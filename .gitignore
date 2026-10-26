@@ -1,0 +1,30 @@
+# Gradle output and caches
+.gradle/
+.gradle-local-maven/
+build/
+
+# Local Java toolchain
+.jdk/
+
+# Minecraft development runtime
+run/
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+
+# Logs and local diagnostics
+/logs/
+/analysis/
+*.log
+compile-errors.txt
+crash-reports/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Temporary extracted game files
+/META-INF/
+/net/

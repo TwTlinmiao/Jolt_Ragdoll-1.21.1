@@ -1,0 +1,41 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.ragdoll.mixin.client",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "LevelChunkTerrainMixin",
+    "EntityRagdollPortalMixin",
+    "EntityFallFlyingAccessor"
+  ],
+  "client": [
+    "CameraLiveRagdollMixin",
+    "GeoArmorRendererMixin",
+    "GuiSleepOverlayMixin",
+    "MinecraftSleepRagdollMixin",
+    "SkinManagerAccessor",
+    "AccessoriesHolderAccessor",
+    "ClientLevelMixin",
+    "EntitySleepCameraMixin",
+    "EntityLiveParticlesMixin",
+    "ScreenEffectLiveFireMixin",
+    "LocalPlayerRagdollPortalMixin",
+    "GuiRagdollPortalMixin",
+    "TrackingEmitterRagdollMixin",
+    "GameRendererRagdollEffectsMixin",
+    "ItemInHandRagdollEffectsMixin",
+    "EntityLivePushMixin",
+    "KeyboardHandlerPhysicsGunMixin",
+    "OptionsLiveRagdollCameraMixin",
+    "LivingEntityMixin",
+    "LivingEntityRendererMixin",
+    "LivingEntityRendererAccessor",
+    "MouseHandlerPhysicsGunMixin",
+    "PlayerRendererPhysicsGunMixin",
+    "PlayerRendererAccessor"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
+
