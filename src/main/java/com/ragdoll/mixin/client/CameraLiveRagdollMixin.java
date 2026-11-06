@@ -23,6 +23,14 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 abstract class CameraLiveRagdollMixin {
     @Shadow protected abstract void setPosition(double x, double y, double z);
     @Shadow protected abstract void setRotation(float yaw, float pitch, float roll);
+    @Shadow private boolean detached;
+
+    @Inject(method = "setup", at = @At("HEAD"))
+    private void ragdoll$enforceVanillaPerspective(BlockGetter level, Entity entity,
+                                                   boolean detached, boolean mirrored,
+                                                   float partialTick, CallbackInfo callback) {
+        com.ragdoll.client.RagdollClient.enforceRagdollCameraType();
+    }
 
     @Inject(method = "setup", at = @At("TAIL"))
     private void ragdoll$attachLiveCamera(BlockGetter level, Entity entity,
@@ -30,6 +38,16 @@ abstract class CameraLiveRagdollMixin {
                                           float partialTick, CallbackInfo callback) {
         Minecraft minecraft = Minecraft.getInstance();
         if (entity == null || entity != minecraft.player) return;
+        if (com.ragdoll.client.DeathRagdollCamera.active()) {
+            Vec3 anchor = com.ragdoll.client.DeathRagdollCamera.anchor(partialTick);
+            setRotation(com.ragdoll.client.DeathRagdollCamera.yaw(), 20.0f, 0.0f);
+            Vector3f look = ((Camera) (Object) this).getLookVector();
+            Vec3 desired = anchor.subtract(new Vec3(look.x(), look.y(), look.z()).scale(4.0));
+            Vec3 position = clipToBlocks(minecraft, entity, anchor, desired);
+            setPosition(position.x, position.y, position.z);
+            this.detached = true;
+            return;
+        }
         boolean firstPerson = minecraft.options.getCameraType().isFirstPerson();
         var ragdollId = ClientPhysicsRuntime.liveRagdollId(entity.getUUID());
         boolean sleepCamera = false;

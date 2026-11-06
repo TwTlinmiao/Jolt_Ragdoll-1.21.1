@@ -514,6 +514,10 @@ final class JoltPhysicsWorld implements AutoCloseable {
     }
 
     private JoltPhysicsWorld(SharedPhysicsContext sharedContext, Level level, TerrainSnapshot terrain, double worldX, double worldY, double worldZ, float yaw, RagdollInitialPose initialPose, float xRot, float velocityX, float velocityY, float velocityZ, float requestedModelScale, RagdollPhysicsSettings physicsSettings, RagdollInitialLimbPose initialLimbPose) {
+        if (initialPose == RagdollInitialPose.CROUCHING) {
+            initialPose = RagdollInitialPose.STANDING;
+            initialLimbPose = null;
+        }
         this.sharedContext = sharedContext;
         layerMap = sharedContext.layerMap;
         objectLayerFilter = sharedContext.objectLayerFilter;
@@ -571,10 +575,10 @@ final class JoltPhysicsWorld implements AutoCloseable {
                         initialLimbPose, "body");
         double crouch = initialPose == RagdollInitialPose.CROUCHING ? 1.0 : 0.0;
         RagdollInitialLimbPose.PartPose bodyPose = initialLimbPose == null
-                ? new RagdollInitialLimbPose.PartPose(0, (float) (crouch * 3.2), 0, 0, 0, 0)
+                ? new RagdollInitialLimbPose.PartPose(0, (float) (crouch * 12.0), 0, 0, 0, 0)
                 : initialLimbPose.body();
         double[] bodyPivotDelta = modelPivotDelta(bodyPose,
-                0.0, crouch * 3.2, 0.0);
+                0.0, crouch * 12.0, 0.0);
         double[] bodyPivotWorldOffset = rotate(rendererRootRotation,
                 bodyPivotDelta[0] * modelScale,
                 bodyPivotDelta[1] * modelScale,
@@ -1226,6 +1230,62 @@ final class JoltPhysicsWorld implements AutoCloseable {
         }
         setPartFrozen(part, true);
         return true;
+    }
+
+    void applyExplosion(net.minecraft.world.phys.Vec3 center, float radius) {
+        if (!Float.isFinite(radius) || radius <= 0) return;
+        for (RagdollPart part : parts) {
+            if (part.frozen) continue;
+            RVec3 position = new RVec3();
+            Quat rotation = new Quat();
+            bodyInterface.getPositionAndRotation(part.bodyId, position, rotation);
+            var pivot = new net.minecraft.world.phys.Vec3(
+                    position.xx() + localOrigin.getX(), position.yy() + localOrigin.getY(),
+                    position.zz() + localOrigin.getZ());
+            double[] offset = rotate(part.offsetX, part.offsetY, part.offsetZ,
+                    rotation.getX(), rotation.getY(), rotation.getZ(), rotation.getW());
+            var shapeCenter = pivot.add(offset[0], offset[1], offset[2]);
+            var direction = shapeCenter.subtract(center);
+            double distance = direction.length();
+            if (distance >= radius * 2.0) continue;
+            double exposure = explosionExposure(center, shapeCenter, part, rotation);
+            if (exposure <= 0.0) continue;
+            var velocity = RagdollExplosionResponse.velocity(distance, radius,
+                    direction.x, direction.y, direction.z, exposure);
+            if (velocity.equals(RagdollExplosionResponse.BlastVelocity.ZERO)) continue;
+            // Scale impulse by mass to apply the target velocity change equally
+            // across limbs with different masses.
+            float mass = partMass(part.name);
+            bodyInterface.addImpulse(part.bodyId, new Vec3((float) velocity.x() * mass,
+                    (float) velocity.y() * mass, (float) velocity.z() * mass));
+            bodyInterface.activateBody(part.bodyId);
+            settledTicks = 0;
+        }
+    }
+
+    private double explosionExposure(net.minecraft.world.phys.Vec3 origin,
+                                     net.minecraft.world.phys.Vec3 center,
+                                     RagdollPart part, Quat rotation) {
+        double[] axisX = rotate(part.halfX * 0.75, 0.0, 0.0,
+                rotation.getX(), rotation.getY(), rotation.getZ(), rotation.getW());
+        double[] axisY = rotate(0.0, part.halfY * 0.75, 0.0,
+                rotation.getX(), rotation.getY(), rotation.getZ(), rotation.getW());
+        double[] axisZ = rotate(0.0, 0.0, part.halfZ * 0.75,
+                rotation.getX(), rotation.getY(), rotation.getZ(), rotation.getW());
+        double[][] samples = {
+                {0.0, 0.0, 0.0}, axisX, {-axisX[0], -axisX[1], -axisX[2]},
+                axisY, {-axisY[0], -axisY[1], -axisY[2]},
+                axisZ, {-axisZ[0], -axisZ[1], -axisZ[2]}
+        };
+        int visible = 0;
+        for (double[] sample : samples) {
+            net.minecraft.world.phys.Vec3 target = center.add(sample[0], sample[1], sample[2]);
+            BlockHitResult hit = level.clip(new ClipContext(origin, target,
+                    ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE,
+                    CollisionContext.empty()));
+            if (hit.getType() == HitResult.Type.MISS) visible++;
+        }
+        return visible / (double) samples.length;
     }
 
     boolean applyAttack(RagdollPart part, double hitX, double hitY, double hitZ, double directionX, double directionY, double directionZ) {

@@ -44,6 +44,11 @@ abstract class MouseHandlerPhysicsGunMixin {
         if (RagdollPhysicsGunClient.handleMouseButton(
                 button, action)) {
             callback.cancel();
+            return;
+        }
+        if (com.ragdoll.client.RagdollClient.handleGrabMouseButton(
+                button, action)) {
+            callback.cancel();
         }
     }
 

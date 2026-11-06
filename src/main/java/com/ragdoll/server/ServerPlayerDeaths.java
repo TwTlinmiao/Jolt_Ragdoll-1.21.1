@@ -21,6 +21,7 @@ import java.util.UUID;
 /** Creates one authoritative ragdoll when a server-side player death occurs. */
 public final class ServerPlayerDeaths {
     private static final String PLAYER_RAGDOLL_MOD_ID = "player_ragdoll";
+    private static final double TICKS_PER_SECOND = 20.0;
 
     private ServerPlayerDeaths() {
     }
@@ -31,14 +32,18 @@ public final class ServerPlayerDeaths {
         }
         ServerRagdollManager.endLiveRagdoll(player, false);
         if (ModList.get().isLoaded(PLAYER_RAGDOLL_MOD_ID)) return;
-        Vec3 velocity = player.getDeltaMovement()
+        // Minecraft entity motion is expressed per tick; Jolt bodies use
+        // world-units per second because the physics world advances in seconds.
+        Vec3 velocity = player.getDeltaMovement().scale(TICKS_PER_SECOND)
                 .add(RagdollDeathKnockback.fromSource(player, event.getSource()));
         UUID ragdollId = UUID.randomUUID();
         if (ServerRagdollManager.spawn(
                 player.serverLevel(),
                 new RagdollSpawnPacket(createSnapshot(
-                        player, ragdollId, velocity)))) {
+                        player, ragdollId, velocity), DeathPoseCache.take(player)))) {
             RagdollLootService.captureOnDeath(player, ragdollId);
+            net.neoforged.neoforge.network.PacketDistributor.sendToPlayer(player,
+                    new com.ragdoll.network.DeathRagdollCameraPacket(ragdollId));
         }
     }
 

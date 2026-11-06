@@ -24,12 +24,15 @@ public final class RagdollMod {
     public RagdollMod(IEventBus modEventBus, ModContainer modContainer) {
         RagdollItems.register(modEventBus);
         RagdollMenus.MENUS.register(modEventBus);
-        modContainer.registerConfig(ModConfig.Type.COMMON, RagdollConfig.SPEC);
+        modContainer.registerConfig(ModConfig.Type.SERVER, RagdollConfig.SERVER_SPEC);
+        modContainer.registerConfig(ModConfig.Type.CLIENT, RagdollConfig.CLIENT_SPEC);
+        modEventBus.addListener(RagdollConfig::onConfigLoading);
         modEventBus.addListener(RagdollNetwork::register);
         NeoForge.EVENT_BUS.addListener(RagdollCommand::register);
         NeoForge.EVENT_BUS.addListener(ServerPlayerDeaths::onLivingDeath);
         NeoForge.EVENT_BUS.addListener(RagdollLootService::suppressVanillaDrops);
         NeoForge.EVENT_BUS.addListener(ServerRagdollManager::onLevelTick);
+        NeoForge.EVENT_BUS.addListener(ServerRagdollManager::onExplosion);
         NeoForge.EVENT_BUS.addListener(ServerRagdollManager::onPlayerLoggedIn);
         NeoForge.EVENT_BUS.addListener(ServerRagdollManager::onPlayerLoggedOut);
         NeoForge.EVENT_BUS.addListener(ServerRagdollManager::onPlayerChangedDimension);

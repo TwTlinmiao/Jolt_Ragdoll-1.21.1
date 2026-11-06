@@ -14,9 +14,12 @@ import java.util.function.Consumer;
 import java.util.UUID;
 
 public final class RagdollNetwork {
+    private static final String PROTOCOL_VERSION = "7";
+
     public static Consumer<RagdollSpawnPacket> clientSpawn = packet -> {};
     public static Consumer<RagdollStatePacket> clientState = packet -> {};
     public static Consumer<RagdollRemovePacket> clientRemove = packet -> {};
+    public static Consumer<DeathRagdollCameraPacket> clientDeathCamera = packet -> {};
     public static Consumer<RagdollPhysicsGunSyncPacket>
             clientPhysicsGunSync = packet -> {};
     public static Consumer<LiveRagdollStatePacket> clientLiveRagdollState = packet -> {};
@@ -25,7 +28,13 @@ public final class RagdollNetwork {
     private RagdollNetwork() {}
 
     public static void register(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar("5").optional();
+        PayloadRegistrar registrar = event.registrar(PROTOCOL_VERSION).optional();
+        registrar.playToServer(DeathPosePacket.TYPE, DeathPosePacket.CODEC,
+                (packet, context) -> context.enqueueWork(() ->
+                        com.ragdoll.server.DeathPoseCache.update(
+                                (ServerPlayer) context.player(), packet.pose())));
+        registrar.playToClient(DeathRagdollCameraPacket.TYPE, DeathRagdollCameraPacket.CODEC,
+                (packet, context) -> context.enqueueWork(() -> clientDeathCamera.accept(packet)));
         registrar.playToClient(RagdollSpawnPacket.TYPE, RagdollSpawnPacket.CODEC,
                 (packet, context) -> context.enqueueWork(() -> clientSpawn.accept(packet)));
         registrar.playToClient(RagdollStatePacket.TYPE, RagdollStatePacket.CODEC,

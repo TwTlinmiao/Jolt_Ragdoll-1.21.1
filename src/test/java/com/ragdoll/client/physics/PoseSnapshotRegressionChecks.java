@@ -19,6 +19,17 @@ public final class PoseSnapshotRegressionChecks {
         if (!snapshot.equals(RagdollInitialLimbPose.fromValues(values))) {
             throw new AssertionError("Pose snapshot changed during network roundtrip");
         }
+        var buffer = new net.minecraft.network.FriendlyByteBuf(io.netty.buffer.Unpooled.buffer());
+        try {
+            com.ragdoll.network.DeathPosePacket.CODEC.encode(buffer,
+                    new com.ragdoll.network.DeathPosePacket(snapshot));
+            var received = com.ragdoll.network.DeathPosePacket.CODEC.decode(buffer);
+            if (!snapshot.equals(received.pose()) || buffer.isReadable()) {
+                throw new AssertionError("Death pose packet lost limb or root transforms");
+            }
+        } finally {
+            buffer.release();
+        }
 
         values[0] = Float.NaN;
         values[1] = 1000.0f;
@@ -29,6 +40,6 @@ public final class PoseSnapshotRegressionChecks {
                 || Math.abs(sanitized.body().xRot()) > (float) Math.PI) {
             throw new AssertionError("Invalid pose values were not sanitized");
         }
-        System.out.println("Pose snapshot checks passed (39-value roundtrip and bounds).");
+        System.out.println("Pose snapshot checks passed (39-value roundtrip, death packet and bounds).");
     }
 }

@@ -3,6 +3,7 @@ package com.ragdoll.mixin.client;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.ragdoll.client.RagdollClient;
 import com.ragdoll.client.physics.RagdollInitialLimbPose;
+import com.ragdoll.client.physics.RagdollPoseCapture;
 import net.minecraft.client.model.EntityModel;
 import net.minecraft.client.model.PlayerModel;
 import net.minecraft.client.player.AbstractClientPlayer;
@@ -40,7 +41,7 @@ abstract class LivingEntityRendererMixin<T extends LivingEntity, M extends Entit
             CallbackInfo callbackInfo) {
         if (entity instanceof AbstractClientPlayer player
                 && model instanceof PlayerModel<?> playerModel) {
-            RagdollInitialLimbPose.captureRenderedPose(
+            RagdollPoseCapture.captureRenderedPose(
                     player, playerModel, partialTick);
         }
     }

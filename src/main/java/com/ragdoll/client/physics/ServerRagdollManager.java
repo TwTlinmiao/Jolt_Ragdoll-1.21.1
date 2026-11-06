@@ -23,6 +23,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.entity.Pose;
+import net.minecraft.world.level.block.BedBlock;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
@@ -55,6 +56,7 @@ public final class ServerRagdollManager {
             new HashSet<>();
     private static final Map<UUID, LiveRagdollSession> LIVE_RAGDOLLS = new LinkedHashMap<>();
     private static final Map<UUID, SleepRagdollSession> SLEEP_RAGDOLLS = new LinkedHashMap<>();
+    private static final Map<UUID, PendingSleepRagdoll> PENDING_SLEEP_RAGDOLLS = new LinkedHashMap<>();
     private static final double PHYSICS_GUN_MAX_DISTANCE = 450.0;
     private static final double PHYSICS_GUN_MIN_DISTANCE = 2.0;
 
@@ -152,11 +154,25 @@ public final class ServerRagdollManager {
                                          SleepRagdollRequestPacket request) {
         if (!RagdollConfig.enabled() || !RagdollConfig.sleepRagdollEnabled()
                 || player == null || request == null || !player.isAlive()
-                || !player.isSleeping() || player.isSpectator()
+                || player.isSpectator()
                 || SLEEP_RAGDOLLS.containsKey(player.getUUID())
                 || !validSleepTransform(player, request)) {
             return;
         }
+        if (!player.isSleeping()) {
+            if (hasNearbyBed(player)) {
+                PENDING_SLEEP_RAGDOLLS.put(player.getUUID(),
+                        new PendingSleepRagdoll(player.serverLevel(), request,
+                                player.serverLevel().getGameTime() + 20L));
+            }
+            return;
+        }
+        createSleepRagdoll(player, request);
+    }
+
+    private static void createSleepRagdoll(ServerPlayer player,
+                                           SleepRagdollRequestPacket request) {
+        if (SLEEP_RAGDOLLS.containsKey(player.getUUID())) return;
         UUID ragdollId = UUID.randomUUID();
         Vec3 velocity = new Vec3(
                 finiteMotion(request.velocityX(), 0.0),
@@ -174,6 +190,42 @@ public final class ServerRagdollManager {
                 new SleepRagdollSession(player.serverLevel(), ragdollId));
         PacketDistributor.sendToPlayersInDimension(player.serverLevel(),
                 new SleepRagdollStatePacket(player.getUUID(), ragdollId, true));
+    }
+
+    private static boolean hasNearbyBed(ServerPlayer player) {
+        BlockPos center = player.blockPosition();
+        for (BlockPos pos : BlockPos.betweenClosed(
+                center.offset(-2, -2, -2), center.offset(2, 2, 2))) {
+            if (player.serverLevel().getBlockState(pos).getBlock() instanceof BedBlock) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void startPendingSleepRagdolls(ServerLevel level) {
+        long gameTime = level.getGameTime();
+        Iterator<Map.Entry<UUID, PendingSleepRagdoll>> iterator =
+                PENDING_SLEEP_RAGDOLLS.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<UUID, PendingSleepRagdoll> entry = iterator.next();
+            PendingSleepRagdoll pending = entry.getValue();
+            if (pending.level != level) continue;
+            ServerPlayer player = level.getServer().getPlayerList().getPlayer(entry.getKey());
+            if (player == null || player.serverLevel() != level
+                    || gameTime > pending.expiresAtGameTime) {
+                iterator.remove();
+                continue;
+            }
+            if (player.isSleeping()) {
+                iterator.remove();
+                if (RagdollConfig.enabled() && RagdollConfig.sleepRagdollEnabled()
+                        && player.isAlive() && !player.isSpectator()
+                        && validSleepTransform(player, pending.request)) {
+                    createSleepRagdoll(player, pending.request);
+                }
+            }
+        }
     }
 
     private static boolean validSleepTransform(ServerPlayer player,
@@ -286,9 +338,15 @@ public final class ServerRagdollManager {
 
     private static Vec3 findSafePosition(ServerPlayer player, Vec3 body) {
         Vec3 feet = new Vec3(body.x, body.y - 0.5, body.z);
+        net.minecraft.world.entity.EntityDimensions dimensions =
+                player.getDimensions(Pose.STANDING);
         for (int up = 0; up <= 3; ++up) {
             Vec3 candidate = feet.add(0, up, 0);
-            AABB box = player.getBoundingBox().move(candidate.subtract(player.position()));
+            double halfWidth = dimensions.width() * 0.5;
+            AABB box = new AABB(
+                    candidate.x - halfWidth, candidate.y, candidate.z - halfWidth,
+                    candidate.x + halfWidth, candidate.y + dimensions.height(),
+                    candidate.z + halfWidth);
             if (player.serverLevel().noCollision(player, box)) return candidate;
         }
         return null;
@@ -600,10 +658,24 @@ public final class ServerRagdollManager {
         }
     }
 
+    public static void onExplosion(net.neoforged.neoforge.event.level.ExplosionEvent.Detonate event) {
+        if (!RagdollConfig.enabled() || !(event.getLevel() instanceof ServerLevel level)) return;
+        var ragdolls = BY_LEVEL.get(level);
+        if (ragdolls == null || ragdolls.isEmpty()) return;
+        var blast = (com.ragdoll.mixin.client.ExplosionAccessor) event.getExplosion();
+        Vec3 center = new Vec3(blast.ragdoll$x(), blast.ragdoll$y(), blast.ragdoll$z());
+        for (ServerRagdoll ragdoll : ragdolls.values()) {
+            if (!ragdoll.paused && ragdoll.world.isSimulationRegionLoaded()) {
+                ragdoll.world.applyExplosion(center, blast.ragdoll$radius());
+            }
+        }
+    }
+
     public static void onLevelTick(LevelTickEvent.Post event) {
         if (!(event.getLevel() instanceof ServerLevel level)) {
             return;
         }
+        startPendingSleepRagdolls(level);
         updateSleepRagdolls(level);
         if (!RagdollConfig.enabled()) {
             for (ServerPlayer player : level.players()) endLiveRagdoll(player, false);
@@ -669,6 +741,8 @@ public final class ServerRagdollManager {
                         ragdoll.packet.toSnapshot().playerId());
                 Vec3 torso = statePosition(state);
                 if (session != null && player != null && player.serverLevel() == level && torso != null) {
+                    player.setForcedPose(Pose.SWIMMING);
+                    player.setPose(Pose.SWIMMING);
                     player.setPos(torso.x, torso.y - 0.5, torso.z);
                     player.setDeltaMovement(Vec3.ZERO);
                     player.hurtMarked = true;
@@ -695,6 +769,7 @@ public final class ServerRagdollManager {
         if (event.getEntity() instanceof ServerPlayer player) {
             endLiveRagdoll(player, false);
             endSleepRagdoll(player.getUUID());
+            PENDING_SLEEP_RAGDOLLS.remove(player.getUUID());
         }
     }
 
@@ -703,6 +778,7 @@ public final class ServerRagdollManager {
         if (event.getEntity() instanceof ServerPlayer player) {
             endLiveRagdoll(player, false);
             endSleepRagdoll(player.getUUID());
+            PENDING_SLEEP_RAGDOLLS.remove(player.getUUID());
             PHYSICS_GUN_ATTEMPTS.remove(player.getUUID());
             PHYSICS_GUN_GRABS.remove(player.getUUID());
             sendExisting(player);
@@ -755,6 +831,7 @@ public final class ServerRagdollManager {
     }
 
     public static void onServerStarted(ServerStartedEvent event) {
+        RagdollConfig.migrateLegacyServerValues();
         JoltBootstrap.initialize();
     }
 
@@ -1245,7 +1322,8 @@ public final class ServerRagdollManager {
             return;
         }
         for (ServerPlayer player : level.players()) {
-            if (LIVE_RAGDOLLS.containsKey(player.getUUID())) {
+            if (LIVE_RAGDOLLS.containsKey(player.getUUID())
+                    || SLEEP_RAGDOLLS.containsKey(player.getUUID())) {
                 continue;
             }
             if (player.isSpectator() || player.isDeadOrDying()) {
@@ -1307,6 +1385,10 @@ public final class ServerRagdollManager {
                                       Vec3 velocity, float fallDistance) {}
 
     private record SleepRagdollSession(ServerLevel level, UUID ragdollId) {}
+
+    private record PendingSleepRagdoll(ServerLevel level,
+                                       SleepRagdollRequestPacket request,
+                                       long expiresAtGameTime) {}
 
     private static final class PhysicsGunGrab {
         private final UUID ragdollId;

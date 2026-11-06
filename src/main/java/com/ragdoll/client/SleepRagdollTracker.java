@@ -3,6 +3,7 @@ package com.ragdoll.client;
 import com.ragdoll.RagdollConfig;
 import com.ragdoll.client.physics.ClientPhysicsRuntime;
 import com.ragdoll.client.physics.RagdollInitialLimbPose;
+import com.ragdoll.client.physics.RagdollPoseCapture;
 import com.ragdoll.model.RagdollInitialPose;
 import com.ragdoll.network.RagdollNetwork;
 import com.ragdoll.network.SleepRagdollRequestPacket;
@@ -52,8 +53,7 @@ final class SleepRagdollTracker {
     }
 
     static void captureBedInteraction(Minecraft minecraft, AbstractClientPlayer player) {
-        if (!RagdollConfig.enabled() || !RagdollConfig.sleepRagdollEnabled()
-                || minecraft.level == null
+        if (!RagdollConfig.enabled() || minecraft.level == null
                 || !(minecraft.hitResult instanceof net.minecraft.world.phys.BlockHitResult hit)
                 || !(minecraft.level.getBlockState(hit.getBlockPos()).getBlock() instanceof BedBlock)) {
             return;
@@ -67,6 +67,24 @@ final class SleepRagdollTracker {
         PRE_BED_MOTIONS.put(player.getUUID(), new CapturedMotion(
                 new Vec3(horizontal.x, 0, horizontal.z), vertical, player.onGround(),
                 player.tickCount + PRE_BED_MOTION_LIFETIME_TICKS));
+
+        UUID playerId = player.getUUID();
+        Vec3 origin = LAST_POSITIONS.getOrDefault(playerId, player.position());
+        boolean wasOnGround = player.onGround();
+        Vec3 previousVertical = new Vec3(0, vertical, 0);
+        Vec3 previousHorizontal = new Vec3(horizontal.x, 0, horizontal.z);
+        Vec3 physicsVelocity = sleepVelocity(
+                player, previousVertical, previousHorizontal, wasOnGround);
+        RagdollNetwork.beginSleepRagdoll(new SleepRagdollRequestPacket(
+                LAST_LIMB_POSES.get(playerId),
+                LAST_POSES.getOrDefault(playerId, RagdollPlayerDeaths.initialPose(player)),
+                origin.x, origin.y, origin.z,
+                LAST_YAWS.getOrDefault(playerId, player.yBodyRot),
+                LAST_PITCHES.getOrDefault(playerId, player.getXRot()),
+                (float) physicsVelocity.x, (float) physicsVelocity.y,
+                (float) physicsVelocity.z,
+                wasOnGround));
+        NEXT_REQUEST_TICKS.put(playerId, player.tickCount + 20);
     }
 
     static void tick(Minecraft minecraft) {
@@ -75,8 +93,7 @@ final class SleepRagdollTracker {
             clear();
             level = currentLevel;
         }
-        if (currentLevel == null || !RagdollConfig.enabled()
-                || !RagdollConfig.sleepRagdollEnabled()) {
+        if (currentLevel == null || !RagdollConfig.enabled()) {
             clear();
             return;
         }
@@ -150,7 +167,7 @@ final class SleepRagdollTracker {
             Minecraft minecraft, AbstractClientPlayer player) {
         var renderer = minecraft.getEntityRenderDispatcher().getRenderer(player);
         return renderer instanceof net.minecraft.client.renderer.entity.player.PlayerRenderer playerRenderer
-                ? RagdollInitialLimbPose.captureCurrentPose(
+                ? RagdollPoseCapture.captureCurrentPose(
                         player, playerRenderer) : null;
     }
 

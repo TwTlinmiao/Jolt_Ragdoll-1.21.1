@@ -35,19 +35,27 @@ public final class RagdollConfigurationScreen extends ConfigurationSectionScreen
         Config basicValues = Config.inMemory();
         Config basicSpecs = Config.inMemory();
         for (String key : BASIC_KEYS) {
+            boolean exists = original.entries().stream().anyMatch(entry -> entry.getKey().equals(key));
+            if (!exists) continue;
             basicValues.set(key, original.modSpec().getValues().getRaw(key));
             basicSpecs.set(key, original.valueSpecs().get(key));
         }
-        Config category = Config.inMemory();
-        category.set("basicSettings", basicValues);
         var entries = new LinkedHashSet<UnmodifiableConfig.Entry>();
-        original.entries().stream().filter(e -> e.getKey().equals("enabled")).forEach(entries::add);
-        entries.addAll(category.entrySet());
+        original.entries().stream()
+                .filter(e -> !e.getKey().equals("_legacyCommonValuesMigrated")
+                        && !BASIC_KEYS.contains(e.getKey())
+                        && e.getKey().equals("enabled"))
+                .forEach(entries::add);
+        if (!basicValues.isEmpty()) {
+            Config category = Config.inMemory();
+            category.set("basicSettings", basicValues);
+            entries.addAll(category.entrySet());
+        }
         for (String key : List.of("sleepRagdoll", "livePlayerRagdoll", "corpseRagdoll")) {
             original.entries().stream().filter(e -> e.getKey().equals(key)).forEach(entries::add);
         }
         var specs = new LinkedHashMap<>(original.valueSpecs());
-        specs.put("basicSettings", basicSpecs);
+        if (!basicValues.isEmpty()) specs.put("basicSettings", basicSpecs);
         return new Context(original.modId(), original.parent(), original.modConfig(), original.modSpec(),
                 entries, specs, original.keylist(), original.filter());
     }

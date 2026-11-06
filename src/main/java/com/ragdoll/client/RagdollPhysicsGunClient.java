@@ -36,7 +36,8 @@ public final class RagdollPhysicsGunClient {
     }
 
     public static void tick(Minecraft minecraft) {
-        if (!RagdollConfig.enabled()) {
+        if (!RagdollConfig.enabled()
+                || RagdollClient.isLocalSleepInteractionLocked()) {
             if (leftDown || rotationMode || isLocalPlayerTrying(minecraft)
                     || isLocalPlayerGrabbing(minecraft)) {
                 stopGrabAttempt();
@@ -68,6 +69,7 @@ public final class RagdollPhysicsGunClient {
             resetLocalState();
             return false;
         }
+        if (RagdollClient.isLocalSleepInteractionLocked()) return false;
         if (minecraft.screen != null) {
             if (isArmed(minecraft)
                     && (leftDown
@@ -195,6 +197,12 @@ public final class RagdollPhysicsGunClient {
 
     public static Set<UUID> tryingPlayers() {
         return Set.copyOf(TRYING_PLAYERS);
+    }
+
+    public static UUID localGrabbedRagdollId(Minecraft minecraft) {
+        if (minecraft.player == null) return null;
+        var grab = ACTIVE_GRABS.get(minecraft.player.getUUID());
+        return grab == null ? null : grab.ragdollId();
     }
 
     public static boolean isArmed(Minecraft minecraft) {

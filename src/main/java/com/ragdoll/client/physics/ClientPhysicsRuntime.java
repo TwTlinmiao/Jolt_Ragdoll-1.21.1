@@ -139,6 +139,7 @@ public final class ClientPhysicsRuntime {
         }
         RagdollPartRenderState torso = getLivePart(minecraft.player.getUUID(), "body", 1.0f);
         if (torso == null) return;
+        minecraft.player.setPose(net.minecraft.world.entity.Pose.SWIMMING);
         Vec3 position = new Vec3(torso.x(), torso.y() - 0.5, torso.z());
         Vec3 velocity = previousLiveTorso == null ? Vec3.ZERO
                 : position.subtract(previousLiveTorso).scale(20.0);
@@ -492,6 +493,19 @@ public final class ClientPhysicsRuntime {
         }
     }
 
+    public static UUID grabbedRagdollId() {
+        return activeGrab == null ? null : activeGrab.ragdoll.id;
+    }
+
+    public static boolean isGrabActive() {
+        return activeGrab != null;
+    }
+
+    public static boolean hasGrabTarget(Minecraft minecraft) {
+        return minecraft.player != null && minecraft.level != null
+                && minecraft.screen == null && selectGrabTarget(minecraft) != null;
+    }
+
     public static boolean attackLookedAtRagdoll(Minecraft minecraft) {
         if (!RagdollConfig.enabled()) {
             return false;
@@ -720,7 +734,7 @@ public final class ClientPhysicsRuntime {
     private static void pushRagdollsFromPlayer(Minecraft minecraft) {
         Player player = minecraft.player;
         if (player == null || player.isSpectator() || player.isDeadOrDying()
-                || isLiveRagdolled(player.getUUID())) {
+                || isLiveRagdolled(player.getUUID()) || player.isSleeping()) {
             return;
         }
         Vec3 movementPerTick = player.position().subtract(

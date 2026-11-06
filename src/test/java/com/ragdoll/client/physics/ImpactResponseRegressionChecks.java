@@ -2,6 +2,20 @@ package com.ragdoll.client.physics;
 
 public final class ImpactResponseRegressionChecks {
     public static void main(String[] args) {
+        var centerBlast = RagdollExplosionResponse.velocity(0, 4, 1, 0, 0, 1);
+        expect(19.778726f, (float) centerBlast.x());
+        expect(2.966810f, (float) centerBlast.y());
+        var halfRangeBlast = RagdollExplosionResponse.velocity(4, 4, 1, 0, 0, 1);
+        expect(9.889363f, (float) halfRangeBlast.x());
+        expect(1.483405f, (float) halfRangeBlast.y());
+        expect(20.0f, (float) RagdollExplosionResponse.velocity(0, 4, 0, 1, 0, 1).y());
+        expect(-20.0f, (float) RagdollExplosionResponse.velocity(0, 4, 0, -1, 0, 1).y());
+        expect(9.889363f, (float) RagdollExplosionResponse.velocity(0, 4, 1, 0, 0, 0.5).x());
+        expect(0.0f, (float) RagdollExplosionResponse.velocity(8, 4, 1, 0, 0, 1).y());
+        expect(0.0f, (float) RagdollExplosionResponse.velocity(1, 0, 1, 0, 0, 1).y());
+        expect(0.0f, (float) RagdollExplosionResponse.velocity(0, 4, 1, 0, 0, 0).y());
+        expect(0.0f, (float) RagdollExplosionResponse.velocity(
+                Double.NaN, 4, 1, 0, 0, 1).y());
         expect(0.0f, RagdollImpactResponse.sweepVerticalVelocity(-0.5f));
         expect(0.592f, RagdollImpactResponse.sweepVerticalVelocity(-2.0f));
         expect(2.62f, RagdollImpactResponse.sweepVerticalVelocity(-5.0f));

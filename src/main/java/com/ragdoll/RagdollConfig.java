@@ -1,13 +1,21 @@
 package com.ragdoll;
 
 import net.neoforged.neoforge.common.ModConfigSpec;
+import net.neoforged.fml.config.ModConfig;
+import net.neoforged.fml.event.config.ModConfigEvent;
+import net.neoforged.fml.loading.FMLPaths;
+import com.electronwill.nightconfig.core.file.CommentedFileConfig;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 
 public final class RagdollConfig {
-    private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
+    private static final String LEGACY_CONFIG_FILE = "ragdoll-common.toml";
+    private static final ModConfigSpec.Builder SERVER_BUILDER = new ModConfigSpec.Builder();
+    private static final ModConfigSpec.Builder CLIENT_BUILDER = new ModConfigSpec.Builder();
 
-    public static final ModConfigSpec.BooleanValue ENABLED = BUILDER
+    public static final ModConfigSpec.BooleanValue ENABLED = SERVER_BUILDER
             .translation("ragdoll.configuration.enabled")
             .comment("Enable ragdoll spawning, simulation, rendering and interaction.")
             .define("enabled", true);
@@ -21,71 +29,79 @@ public final class RagdollConfig {
     public static final ModConfigSpec.EnumValue<LiveCameraMode> LIVE_RAGDOLL_CAMERA_MODE;
     public static final ModConfigSpec.BooleanValue CORPSE_RAGDOLL_ENABLED;
     public static final ModConfigSpec.BooleanValue CORPSE_OWNER_ONLY;
+    private static final ModConfigSpec.BooleanValue SERVER_VALUES_MIGRATED;
+    private static final ModConfigSpec.BooleanValue CLIENT_VALUES_MIGRATED;
 
     static {
-        BUILDER.push("sleepRagdoll");
-        SLEEP_RAGDOLL = BUILDER
+        SERVER_BUILDER.push("sleepRagdoll");
+        SLEEP_RAGDOLL = SERVER_BUILDER
                 .translation("ragdoll.configuration.sleepRagdoll.enabled")
                 .comment("Turn the player into a physics ragdoll when they enter a bed.")
                 .define("enabled", false);
-        SLEEP_RAGDOLL_REPLACE_SCREEN = BUILDER
+        SERVER_BUILDER.pop();
+
+        CLIENT_BUILDER.push("sleepRagdoll");
+        SLEEP_RAGDOLL_REPLACE_SCREEN = CLIENT_BUILDER
                 .translation("ragdoll.configuration.sleepRagdoll.replaceScreen")
                 .comment("Replace the vanilla sleeping screen with a ragdoll camera.")
                 .define("replaceScreen", true);
-        SLEEP_RAGDOLL_CAMERA_MODE = BUILDER
+        SLEEP_RAGDOLL_CAMERA_MODE = CLIENT_BUILDER
                 .translation("ragdoll.configuration.sleepRagdoll.cameraMode")
                 .comment("Initial camera perspective while sleeping as a ragdoll.")
                 .defineEnum("cameraMode", SleepCameraMode.THIRD_PERSON);
-        BUILDER.pop();
+        CLIENT_BUILDER.pop();
 
-        BUILDER.push("livePlayerRagdoll");
-        LIVE_RAGDOLL = BUILDER
+        SERVER_BUILDER.push("livePlayerRagdoll");
+        LIVE_RAGDOLL = SERVER_BUILDER
                 .translation("ragdoll.configuration.livePlayerRagdoll.enabled")
                 .comment("Allow players to temporarily become physics ragdolls with the toggle key.")
                 .define("enabled", false);
-        LIVE_RAGDOLL_CAMERA_ENABLED = BUILDER
+        SERVER_BUILDER.pop();
+
+        CLIENT_BUILDER.push("livePlayerRagdoll");
+        LIVE_RAGDOLL_CAMERA_ENABLED = CLIENT_BUILDER
                 .translation("ragdoll.configuration.livePlayerRagdoll.cameraEnabled")
                 .comment("Attach the camera to the live ragdoll while ragdolled.")
                 .define("cameraEnabled", true);
-        LIVE_RAGDOLL_CAMERA_MODE = BUILDER
+        LIVE_RAGDOLL_CAMERA_MODE = CLIENT_BUILDER
                 .translation("ragdoll.configuration.livePlayerRagdoll.cameraMode")
                 .comment("Camera perspective used while controlling a live ragdoll.")
                 .defineEnum("cameraMode", LiveCameraMode.FIRST_PERSON);
-        BUILDER.pop();
+        CLIENT_BUILDER.pop();
 
-        BUILDER.push("corpseRagdoll");
-        CORPSE_RAGDOLL_ENABLED = BUILDER
+        SERVER_BUILDER.push("corpseRagdoll");
+        CORPSE_RAGDOLL_ENABLED = SERVER_BUILDER
                 .translation("ragdoll.configuration.corpseRagdoll.enabled")
                 .comment("Allow players to keep and retrieve items from their ragdoll corpse.")
                 .define("enabled", true);
-        CORPSE_OWNER_ONLY = BUILDER
+        CORPSE_OWNER_ONLY = SERVER_BUILDER
                 .translation("ragdoll.configuration.corpseRagdoll.ownerOnly")
                 .comment("Only allow the owner of a ragdoll corpse container to open it.")
                 .define("ownerOnly", true);
-        BUILDER.pop();
+        SERVER_BUILDER.pop();
     }
 
-    public static final ModConfigSpec.IntValue DESPAWN_SECONDS = BUILDER
+    public static final ModConfigSpec.IntValue DESPAWN_SECONDS = SERVER_BUILDER
             .translation("ragdoll.configuration.despawnSeconds")
             .comment("How many seconds a player ragdoll remains. Zero keeps it permanently.")
             .defineInRange("despawnSeconds", 8, 0, 120);
-    public static final ModConfigSpec.IntValue MAX_RAGDOLLS = BUILDER
+    public static final ModConfigSpec.IntValue MAX_RAGDOLLS = SERVER_BUILDER
             .translation("ragdoll.configuration.maxRagdolls")
             .comment("Maximum number of player ragdolls retained in a world.")
             .defineInRange("maxRagdolls", 16, 1, 64);
-    public static final ModConfigSpec.BooleanValue SELF_COLLISION = BUILDER
+    public static final ModConfigSpec.BooleanValue SELF_COLLISION = SERVER_BUILDER
             .translation("ragdoll.configuration.selfCollision")
             .comment("When disabled, only directly connected body parts ignore each other; other pairs still collide.")
             .define("selfCollision", true);
-    public static final ModConfigSpec.BooleanValue RENDER_CAPE = BUILDER
+    public static final ModConfigSpec.BooleanValue RENDER_CAPE = CLIENT_BUILDER
             .translation("ragdoll.configuration.renderCape")
             .comment("Render the saved player cape on ragdolls.")
             .define("renderCape", false);
-    public static final ModConfigSpec.BooleanValue RENDER_3D_SKIN = BUILDER
+    public static final ModConfigSpec.BooleanValue RENDER_3D_SKIN = CLIENT_BUILDER
             .translation("ragdoll.configuration.render3dSkin")
             .comment("Render 3D Skin Layers meshes on ragdolls when the mod is installed.")
             .define("render3dSkin", true);
-    public static final ModConfigSpec.BooleanValue RENDER_HD_3D_SKIN = BUILDER
+    public static final ModConfigSpec.BooleanValue RENDER_HD_3D_SKIN = CLIENT_BUILDER
             .translation("ragdoll.configuration.renderHd3dSkin")
             .comment("Generate a separate 3D outer shell for HD ragdoll skins. Disabled by default.")
             .define("renderHd3dSkin", false);
@@ -97,63 +113,146 @@ public final class RagdollConfig {
             "right_arm", new CollisionSettings(0.125, 0.625, 0.25, 0.0, 0.0, 0.0),
             "left_leg", new CollisionSettings(0.125, 0.625, 0.25, 0.0, 0.0, 0.0),
             "right_leg", new CollisionSettings(0.125, 0.625, 0.25, 0.0, 0.0, 0.0));
-    public static final ModConfigSpec SPEC = BUILDER.build();
+    static {
+        SERVER_VALUES_MIGRATED = SERVER_BUILDER
+                .define("_legacyCommonValuesMigrated", false);
+        CLIENT_VALUES_MIGRATED = CLIENT_BUILDER
+                .define("_legacyCommonValuesMigrated", false);
+    }
+
+    public static final ModConfigSpec SERVER_SPEC = SERVER_BUILDER.build();
+    public static final ModConfigSpec CLIENT_SPEC = CLIENT_BUILDER.build();
 
     private RagdollConfig() {}
 
     public static boolean enabled() {
-        return ENABLED.get();
+        return serverValue(ENABLED, true);
     }
 
     public static boolean sleepRagdollEnabled() {
-        return SLEEP_RAGDOLL.get();
+        return serverValue(SLEEP_RAGDOLL, false);
     }
 
     public static boolean sleepRagdollReplaceScreen() {
-        return sleepRagdollEnabled() && SLEEP_RAGDOLL_REPLACE_SCREEN.get();
+        return clientValue(SLEEP_RAGDOLL_REPLACE_SCREEN, true);
     }
 
     public static SleepCameraMode sleepRagdollCameraMode() {
-        return SLEEP_RAGDOLL_CAMERA_MODE.get();
+        return clientValue(SLEEP_RAGDOLL_CAMERA_MODE, SleepCameraMode.THIRD_PERSON);
     }
 
     public static boolean liveRagdollEnabled() {
-        return LIVE_RAGDOLL.get();
+        return serverValue(LIVE_RAGDOLL, false);
     }
 
     public static boolean liveRagdollCameraEnabled() {
-        return LIVE_RAGDOLL_CAMERA_ENABLED.get();
+        return clientValue(LIVE_RAGDOLL_CAMERA_ENABLED, true);
     }
 
     public static LiveCameraMode liveRagdollCameraMode() {
-        return LIVE_RAGDOLL_CAMERA_MODE.get();
+        return clientValue(LIVE_RAGDOLL_CAMERA_MODE, LiveCameraMode.FIRST_PERSON);
     }
 
     public static boolean corpseRagdollEnabled() {
-        return CORPSE_RAGDOLL_ENABLED.get();
+        return serverValue(CORPSE_RAGDOLL_ENABLED, true);
     }
 
     public static boolean corpseOwnerOnly() {
-        return CORPSE_OWNER_ONLY.get();
+        return serverValue(CORPSE_OWNER_ONLY, true);
     }
 
     public static void setEnabled(boolean value) {
         ENABLED.set(value);
-        SPEC.save();
+        SERVER_SPEC.save();
     }
 
-    public static long despawnTicks() { return DESPAWN_SECONDS.getAsInt() * 20L; }
-    public static int maxRagdolls() { return MAX_RAGDOLLS.getAsInt(); }
+    public static void onConfigLoading(ModConfigEvent.Loading event) {
+        ModConfig config = event.getConfig();
+        if (!"ragdoll".equals(config.getModId())) return;
+        if (config.getType() == ModConfig.Type.CLIENT && !CLIENT_VALUES_MIGRATED.get()) {
+            migrateLegacyValues(false);
+            CLIENT_VALUES_MIGRATED.set(true);
+            CLIENT_SPEC.save();
+        }
+    }
+
+    public static void migrateLegacyServerValues() {
+        if (SERVER_VALUES_MIGRATED.get()) return;
+        migrateLegacyValues(true);
+        SERVER_VALUES_MIGRATED.set(true);
+        SERVER_SPEC.save();
+    }
+
+    private static void migrateLegacyValues(boolean serverValues) {
+        Path legacyPath = FMLPaths.CONFIGDIR.get().resolve(LEGACY_CONFIG_FILE);
+        if (!Files.isRegularFile(legacyPath)) return;
+        try (CommentedFileConfig legacy = CommentedFileConfig.builder(legacyPath).sync().build()) {
+            legacy.load();
+            if (serverValues) {
+                copyLegacy(legacy, "enabled", ENABLED);
+                copyLegacy(legacy, "sleepRagdoll.enabled", SLEEP_RAGDOLL);
+                copyLegacy(legacy, "livePlayerRagdoll.enabled", LIVE_RAGDOLL);
+                copyLegacy(legacy, "corpseRagdoll.enabled", CORPSE_RAGDOLL_ENABLED);
+                copyLegacy(legacy, "corpseRagdoll.ownerOnly", CORPSE_OWNER_ONLY);
+                copyLegacy(legacy, "despawnSeconds", DESPAWN_SECONDS);
+                copyLegacy(legacy, "maxRagdolls", MAX_RAGDOLLS);
+                copyLegacy(legacy, "selfCollision", SELF_COLLISION);
+            } else {
+                copyLegacy(legacy, "sleepRagdoll.replaceScreen", SLEEP_RAGDOLL_REPLACE_SCREEN);
+                copyLegacyEnum(legacy, "sleepRagdoll.cameraMode", SLEEP_RAGDOLL_CAMERA_MODE);
+                copyLegacy(legacy, "livePlayerRagdoll.cameraEnabled", LIVE_RAGDOLL_CAMERA_ENABLED);
+                copyLegacyEnum(legacy, "livePlayerRagdoll.cameraMode", LIVE_RAGDOLL_CAMERA_MODE);
+                copyLegacy(legacy, "renderCape", RENDER_CAPE);
+                copyLegacy(legacy, "render3dSkin", RENDER_3D_SKIN);
+                copyLegacy(legacy, "renderHd3dSkin", RENDER_HD_3D_SKIN);
+            }
+        } catch (RuntimeException exception) {
+            com.ragdoll.RagdollMod.LOGGER.warn("Could not migrate legacy ragdoll config values", exception);
+        }
+    }
+
+    private static <T> void copyLegacy(CommentedFileConfig legacy, String path,
+                                       ModConfigSpec.ConfigValue<T> target) {
+        Object value = legacy.get(path);
+        if (value != null) {
+            try {
+                @SuppressWarnings("unchecked") T typed = (T) value;
+                target.set(typed);
+            } catch (ClassCastException ignored) {
+                RagdollMod.LOGGER.warn("Ignoring legacy config value with invalid type: {}", path);
+            }
+        }
+    }
+
+    private static <E extends Enum<E>> void copyLegacyEnum(
+            CommentedFileConfig legacy, String path,
+            ModConfigSpec.EnumValue<E> target) {
+        Object value = legacy.get(path);
+        if (value instanceof String name) {
+            try {
+                target.set(Enum.valueOf(target.get().getDeclaringClass(), name));
+            } catch (IllegalArgumentException exception) {
+                RagdollMod.LOGGER.warn("Ignoring unknown legacy config value for {}: {}", path, name);
+            }
+        }
+    }
+
+    public static long despawnTicks() {
+        return serverValue(DESPAWN_SECONDS, 8) * 20L;
+    }
+    public static int maxRagdolls() {
+        return serverValue(MAX_RAGDOLLS, 16);
+    }
     public static boolean selfCollisionEnabled() {
-        return SELF_COLLISION.get();
+        return serverValue(SELF_COLLISION, true);
     }
 
     public static boolean renderCape() {
-        return RENDER_CAPE.get();
+        return clientValue(RENDER_CAPE, false);
     }
 
     public static boolean render3dSkin() {
-        return skinLayersAvailable() && RENDER_3D_SKIN.get();
+        return skinLayersAvailable() && clientValue(RENDER_3D_SKIN, true);
     }
 
     public static boolean skinLayersAvailable() {
@@ -161,7 +260,25 @@ public final class RagdollConfig {
     }
 
     public static boolean renderHd3dSkin() {
-        return render3dSkin() && RENDER_HD_3D_SKIN.get();
+        return render3dSkin() && clientValue(RENDER_HD_3D_SKIN, false);
+    }
+
+    private static boolean serverValue(ModConfigSpec.BooleanValue value,
+                                       boolean defaultValue) {
+        return SERVER_SPEC.isLoaded() ? value.get() : defaultValue;
+    }
+
+    private static int serverValue(ModConfigSpec.IntValue value, int defaultValue) {
+        return SERVER_SPEC.isLoaded() ? value.get() : defaultValue;
+    }
+
+    private static boolean clientValue(ModConfigSpec.BooleanValue value,
+                                       boolean defaultValue) {
+        return CLIENT_SPEC.isLoaded() ? value.get() : defaultValue;
+    }
+
+    private static <T> T clientValue(ModConfigSpec.ConfigValue<T> value, T defaultValue) {
+        return CLIENT_SPEC.isLoaded() ? value.get() : defaultValue;
     }
 
     public static boolean showCollisionBoxes() {

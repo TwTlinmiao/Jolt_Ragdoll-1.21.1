@@ -15,6 +15,7 @@ abstract class ItemInHandRagdollEffectsMixin {
     @Inject(method = "renderHandsWithItems", at = @At("HEAD"), cancellable = true)
     private void ragdoll$hideHands(float partialTick, PoseStack poses,
             MultiBufferSource.BufferSource buffers, LocalPlayer player, int light, CallbackInfo ci) {
-        if (RagdollVisualEffects.hidden(player)) ci.cancel();
+        if (RagdollVisualEffects.hidden(player)
+                || com.ragdoll.client.DeathRagdollCamera.active()) ci.cancel();
     }
 }
