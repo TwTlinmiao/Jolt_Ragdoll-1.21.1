@@ -30,6 +30,7 @@ public final class RagdollMod {
         modEventBus.addListener(RagdollNetwork::register);
         NeoForge.EVENT_BUS.addListener(RagdollCommand::register);
         NeoForge.EVENT_BUS.addListener(ServerPlayerDeaths::onLivingDeath);
+        NeoForge.EVENT_BUS.addListener(ServerRagdollManager::onLivingDamage);
         NeoForge.EVENT_BUS.addListener(RagdollLootService::suppressVanillaDrops);
         NeoForge.EVENT_BUS.addListener(ServerRagdollManager::onLevelTick);
         NeoForge.EVENT_BUS.addListener(ServerRagdollManager::onExplosion);

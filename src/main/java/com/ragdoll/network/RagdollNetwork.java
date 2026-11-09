@@ -14,7 +14,7 @@ import java.util.function.Consumer;
 import java.util.UUID;
 
 public final class RagdollNetwork {
-    private static final String PROTOCOL_VERSION = "7";
+    private static final String PROTOCOL_VERSION = "8";
 
     public static Consumer<RagdollSpawnPacket> clientSpawn = packet -> {};
     public static Consumer<RagdollStatePacket> clientState = packet -> {};
@@ -57,6 +57,10 @@ public final class RagdollNetwork {
                         ServerRagdollManager.toggleLiveRagdoll(player, packet);
                     }
                 }));
+        registrar.playToServer(LiveRagdollControlPacket.TYPE, LiveRagdollControlPacket.CODEC,
+                (packet, context) -> context.enqueueWork(() ->
+                        ServerRagdollManager.handleLiveRagdollControl(
+                                (ServerPlayer) context.player(), packet)));
         registrar.playToServer(SleepRagdollRequestPacket.TYPE, SleepRagdollRequestPacket.CODEC,
                 (packet, context) -> context.enqueueWork(() ->
                         ServerRagdollManager.beginSleepRagdoll(
@@ -71,6 +75,10 @@ public final class RagdollNetwork {
                         ServerRagdollManager.handlePhysicsGun(
                                 packet,
                                 (ServerPlayer) context.player())));
+        registrar.playToServer(RagdollPushPacket.TYPE, RagdollPushPacket.CODEC,
+                (packet, context) -> context.enqueueWork(() ->
+                        ServerRagdollManager.handlePushAction(
+                                (ServerPlayer) context.player(), packet.ragdollId())));
         registrar.playToServer(
                 RagdollLootOpenPacket.TYPE,
                 RagdollLootOpenPacket.CODEC,
@@ -88,6 +96,15 @@ public final class RagdollNetwork {
             RagdollPhysicsGunActionPacket packet) {
         PacketDistributor.sendToServer(
                 packet, new CustomPacketPayload[0]);
+    }
+
+    public static void pushOrThrow(UUID ragdollId) {
+        PacketDistributor.sendToServer(
+                new RagdollPushPacket(ragdollId), new CustomPacketPayload[0]);
+    }
+
+    public static void sendLiveRagdollControl(LiveRagdollControlPacket packet) {
+        PacketDistributor.sendToServer(packet, new CustomPacketPayload[0]);
     }
 
     public static void toggleLiveRagdoll() {

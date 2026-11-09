@@ -11,20 +11,26 @@ import com.ragdoll.network.RagdollPhysicsGunActionPacket;
 import com.ragdoll.network.RagdollPhysicsGunSyncPacket;
 import com.ragdoll.network.LiveRagdollStatePacket;
 import com.ragdoll.network.LiveRagdollRequestPacket;
+import com.ragdoll.network.LiveRagdollControlPacket;
 import com.ragdoll.network.SleepRagdollRequestPacket;
 import com.ragdoll.network.SleepRagdollStatePacket;
 import com.ragdoll.mixin.client.EntityFallFlyingAccessor;
 import com.ragdoll.item.RagdollItems;
 import com.ragdoll.server.RagdollSavedData;
 import com.ragdoll.server.ServerPlayerDeaths;
+import com.ragdoll.server.DeathPoseCache;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.entity.Pose;
+import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.damagesource.DamageTypes;
+import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.world.level.block.BedBlock;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.LevelTickEvent;
@@ -54,11 +60,20 @@ public final class ServerRagdollManager {
             new LinkedHashMap<>();
     private static final Set<UUID> PHYSICS_GUN_ATTEMPTS =
             new HashSet<>();
+    private static final Map<UUID, Vec3> DAMAGE_RAGDOLL_PENDING =
+            new LinkedHashMap<>();
+    private static final float ENTITY_DAMAGE_THRESHOLD = 4.0f;
+    private static final float ENVIRONMENT_DAMAGE_THRESHOLD = 2.0f;
     private static final Map<UUID, LiveRagdollSession> LIVE_RAGDOLLS = new LinkedHashMap<>();
     private static final Map<UUID, SleepRagdollSession> SLEEP_RAGDOLLS = new LinkedHashMap<>();
     private static final Map<UUID, PendingSleepRagdoll> PENDING_SLEEP_RAGDOLLS = new LinkedHashMap<>();
     private static final double PHYSICS_GUN_MAX_DISTANCE = 450.0;
     private static final double PHYSICS_GUN_MIN_DISTANCE = 2.0;
+    private static final double RAGDOLL_SYNC_DISTANCE = 128.0;
+    private static final double RAGDOLL_SYNC_DISTANCE_SQUARED =
+            RAGDOLL_SYNC_DISTANCE * RAGDOLL_SYNC_DISTANCE;
+    private static final long RAGDOLL_STATE_SYNC_INTERVAL = 2L;
+    private static final long RAGDOLL_STATE_SAVE_INTERVAL = 10L;
 
     private ServerRagdollManager() {
     }
@@ -97,9 +112,7 @@ public final class ServerRagdollManager {
         ragdolls.put(packet.ragdollId(), ragdoll);
         RagdollPhysicsState initialState = world.captureState();
         if (!live) RagdollSavedData.get(level).put(packet, initialState, 0L);
-        PacketDistributor.sendToPlayersInDimension(level, packet);
-        PacketDistributor.sendToPlayersInDimension(
-                level, createStatePacket(ragdoll, initialState));
+        syncRagdollRecipients(level, ragdoll, initialState);
         RagdollMod.LOGGER.info(
                 "Spawned server-authoritative ragdoll {} in {}",
                 packet.ragdollId(), level.dimension().location());
@@ -110,13 +123,160 @@ public final class ServerRagdollManager {
         toggleLiveRagdoll(player, new LiveRagdollRequestPacket());
     }
 
+    /** Queues a non-lethal heavy hit for conversion on the next server tick. */
+    public static void onLivingDamage(LivingDamageEvent.Post event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)
+                || !RagdollConfig.enabled()
+                || !RagdollConfig.liveRagdollEnabled()
+                || !RagdollConfig.liveRagdollDamageEnabled()
+                || !player.isAlive() || player.isSpectator()
+                || player.isSleeping() || player.isPassenger()
+                || player.isCreative()
+                || isPlayerRagdolled(player.getUUID())) return;
+        DamageSource source = event.getSource();
+        boolean elytraCollision = source.is(DamageTypes.FLY_INTO_WALL);
+        boolean lightningDamage = source.is(DamageTypes.LIGHTNING_BOLT);
+        if (player.isFallFlying() && !elytraCollision && !lightningDamage) return;
+        boolean fallDamage = source.is(DamageTypes.FALL);
+        boolean explosionDamage = source.is(DamageTypeTags.IS_EXPLOSION);
+        boolean entityHit = source.getEntity() != null;
+        boolean heavyHit = !elytraCollision && !lightningDamage && !fallDamage
+                && !explosionDamage && !entityHit;
+        boolean enabled = (elytraCollision && RagdollConfig.liveRagdollWallImpactEnabled())
+                || (lightningDamage && RagdollConfig.liveRagdollLightningEnabled())
+                || (explosionDamage && RagdollConfig.liveRagdollExplosionDamageEnabled())
+                || (fallDamage && RagdollConfig.liveRagdollFallDamageEnabled())
+                || (entityHit && RagdollConfig.liveRagdollEntityDamageEnabled())
+                || (heavyHit && RagdollConfig.liveRagdollHeavyHitEnabled());
+        if (!enabled) return;
+        float threshold = elytraCollision
+                ? RagdollConfig.liveRagdollWallImpactThreshold()
+                : lightningDamage
+                        ? RagdollConfig.liveRagdollLightningThreshold()
+                : explosionDamage
+                        ? RagdollConfig.liveRagdollExplosionDamageThreshold()
+                        : fallDamage
+                                ? RagdollConfig.liveRagdollFallDamageThreshold()
+                                : entityHit ? RagdollConfig.liveRagdollEntityDamageThreshold()
+                                : heavyHit ? RagdollConfig.liveRagdollHeavyHitThreshold()
+                                : Float.POSITIVE_INFINITY;
+        // Post#getNewDamage is health damage after absorption. Add the absorbed
+        // portion so a hit fully caught by absorption still reaches the threshold.
+        float damageBeforeAbsorption = event.getNewDamage()
+                + event.getReduction(net.neoforged.neoforge.common.damagesource.DamageContainer.Reduction.ABSORPTION);
+        if (damageBeforeAbsorption >= threshold) {
+            float forceScale = elytraCollision
+                    ? RagdollConfig.liveRagdollWallImpactForce()
+                    : lightningDamage ? RagdollConfig.liveRagdollLightningForce()
+                    : explosionDamage ? RagdollConfig.liveRagdollExplosionForce()
+                    : fallDamage ? RagdollConfig.liveRagdollFallForce()
+                    : entityHit ? RagdollConfig.liveRagdollEntityDamageForce()
+                    : RagdollConfig.liveRagdollHeavyHitForce();
+            Vec3 impactImpulse = triggerImpulse(
+                    player, source, damageBeforeAbsorption, forceScale,
+                    elytraCollision, lightningDamage, explosionDamage, fallDamage);
+            DAMAGE_RAGDOLL_PENDING.merge(player.getUUID(), impactImpulse, Vec3::add);
+        }
+    }
+
+    private static Vec3 triggerImpulse(
+            ServerPlayer player, DamageSource source, float damage, float forceScale,
+            boolean wallImpact, boolean lightning, boolean explosion, boolean fall) {
+        Vec3 impulse;
+        if (lightning) {
+            impulse = new Vec3(
+                    (player.getRandom().nextDouble() - 0.5) * 0.4,
+                    0.55,
+                    (player.getRandom().nextDouble() - 0.5) * 0.4);
+        } else if (fall) {
+            double fallDistance = Math.max(0.0, player.fallDistance);
+            double impactSpeed = Math.min(1.6, Math.sqrt(fallDistance * 0.16));
+            impulse = Math.abs(player.getDeltaMovement().y) < 0.15
+                    ? new Vec3(0.0, -impactSpeed, 0.0) : Vec3.ZERO;
+        } else {
+            Vec3 direction;
+            if (wallImpact) {
+                Vec3 movement = player.getDeltaMovement();
+                direction = movement.lengthSqr() > 1.0e-4
+                        ? movement.normalize() : player.getLookAngle().normalize();
+            } else if (source.getSourcePosition() != null) {
+                direction = player.getBoundingBox().getCenter()
+                        .subtract(source.getSourcePosition()).normalize();
+            } else if (source.getEntity() != null) {
+                direction = player.getBoundingBox().getCenter()
+                        .subtract(source.getEntity().position()).normalize();
+            } else {
+                Vec3 movement = player.getDeltaMovement();
+                direction = movement.lengthSqr() > 1.0e-4
+                        ? movement.normalize() : new Vec3(0.0, 0.0, 1.0);
+            }
+
+            if (explosion) {
+                double strength = Math.min(1.6, 0.45 + damage * 0.04);
+                impulse = direction.scale(strength).add(0.0, 0.25, 0.0);
+            } else if (!wallImpact && source.getDirectEntity()
+                    instanceof net.minecraft.world.entity.projectile.Projectile projectile) {
+                impulse = projectile.getDeltaMovement().scale(0.6);
+            } else {
+                double strength = Math.min(1.0, 0.25 + damage * 0.025);
+                impulse = new Vec3(direction.x, 0.0, direction.z)
+                        .normalize().scale(strength).add(0.0, 0.2, 0.0);
+            }
+        }
+        return impulse.scale(TICKS_TO_SECONDS * forceScale);
+    }
+
+    private static void processDamageRagdolls(ServerLevel level) {
+        for (ServerPlayer player : level.players()) {
+            Vec3 impactImpulse = DAMAGE_RAGDOLL_PENDING.remove(player.getUUID());
+            if (impactImpulse == null
+                    || !player.isAlive() || player.isSpectator()
+                    || player.isSleeping() || player.isPassenger()
+                    || player.isCreative()
+                    || isPlayerRagdolled(player.getUUID())) continue;
+            RagdollInitialLimbPose pose = DeathPoseCache.take(player);
+            Vec3 motion = player.getDeltaMovement().scale(TICKS_TO_SECONDS)
+                    .add(impactImpulse);
+            toggleLiveRagdoll(player, new LiveRagdollRequestPacket(
+                    pose, null, 0.0, 0.0, 0.0, 0.0f, 0.0f, false,
+                    (float) motion.x, (float) motion.y, (float) motion.z,
+                    player.onGround()));
+        }
+    }
+
     public static void toggleLiveRagdoll(ServerPlayer player, LiveRagdollRequestPacket request) {
+        toggleLiveRagdoll(player, request, false);
+    }
+
+    public static void handleLiveRagdollControl(ServerPlayer player,
+                                                LiveRagdollControlPacket packet) {
+        if (player == null || packet == null) return;
+        LiveRagdollSession session = LIVE_RAGDOLLS.get(player.getUUID());
+        if (session == null || session.level != player.serverLevel()) return;
+        LinkedHashMap<UUID, ServerRagdoll> ragdolls = BY_LEVEL.get(session.level);
+        ServerRagdoll ragdoll = ragdolls == null ? null : ragdolls.get(session.ragdollId);
+        if (ragdoll == null || !ragdoll.live) return;
+
+        float strafe = packet.strafe();
+        float forward = packet.forward();
+        if (!Float.isFinite(strafe) || !Float.isFinite(forward)
+                || Math.abs(strafe) > 1.01f || Math.abs(forward) > 1.01f) {
+            strafe = 0.0f;
+            forward = 0.0f;
+        }
+        ragdoll.world.setLiveRagdollControl(
+                packet.leftHand(), packet.rightHand(), strafe, forward);
+    }
+
+    private static void toggleLiveRagdoll(ServerPlayer player,
+                                          LiveRagdollRequestPacket request,
+                                          boolean pushed) {
         LiveRagdollSession current = LIVE_RAGDOLLS.get(player.getUUID());
         if (current != null) {
             endLiveRagdoll(player, true);
             return;
         }
-        if (!RagdollConfig.liveRagdollEnabled() || !player.isAlive()
+        if ((!pushed && !RagdollConfig.liveRagdollEnabled()) || !player.isAlive()
                 || player.isSpectator() || player.isSleeping() || player.isPassenger()) return;
         UUID ragdollId = UUID.randomUUID();
         double vx = finiteMotion(request.velocityX(), player.getDeltaMovement().x * TICKS_TO_SECONDS);
@@ -148,6 +308,104 @@ public final class ServerRagdollManager {
         player.hurtMarked = true;
         PacketDistributor.sendToPlayersInDimension(player.serverLevel(),
                 new LiveRagdollStatePacket(player.getUUID(), ragdollId, true));
+    }
+
+    public static void handlePushAction(ServerPlayer player, UUID requestedRagdollId) {
+        if (!RagdollConfig.enabled() || player == null || player.isSpectator()
+                || player.isSleeping() || isPlayerRagdolled(player.getUUID())) return;
+
+        LinkedHashMap<UUID, ServerRagdoll> ragdolls = BY_LEVEL.get(player.serverLevel());
+
+        if (requestedRagdollId != null) {
+            PhysicsGunGrab requestedPhysicsGrab =
+                    PHYSICS_GUN_GRABS.get(player.getUUID());
+            ServerRagdoll requestedRagdoll = ragdolls == null
+                    ? null : ragdolls.get(requestedRagdollId);
+            boolean physicsGunHeld = requestedRagdoll != null
+                    && requestedPhysicsGrab != null
+                    && requestedRagdollId.equals(requestedPhysicsGrab.ragdollId);
+            boolean handGrabHeld = requestedRagdoll != null
+                    && player.getUUID().equals(requestedRagdoll.grabber);
+            if (physicsGunHeld || handGrabHeld) {
+                if (physicsGunHeld) {
+                    PHYSICS_GUN_GRABS.remove(player.getUUID());
+                    requestedRagdoll.world.clearPhysicsGunControl(player.getUUID());
+                    syncPhysicsGun(player.serverLevel());
+                }
+                if (handGrabHeld) {
+                    requestedRagdoll.releaseGrab();
+                }
+                throwRagdoll(requestedRagdoll.world, player);
+            }
+            return;
+        }
+
+        PhysicsGunGrab physicsGrab = PHYSICS_GUN_GRABS.remove(player.getUUID());
+        if (physicsGrab != null && ragdolls != null) {
+            ServerRagdoll ragdoll = ragdolls.get(physicsGrab.ragdollId);
+            if (ragdoll != null) {
+                ragdoll.world.clearPhysicsGunControl(player.getUUID());
+                throwRagdoll(ragdoll.world, player);
+                syncPhysicsGun(player.serverLevel());
+                return;
+            }
+        }
+
+        if (ragdolls != null) {
+            for (ServerRagdoll ragdoll : ragdolls.values()) {
+                if (player.getUUID().equals(ragdoll.grabber)) {
+                    ragdoll.releaseGrab();
+                    Vec3 velocity = throwVelocity(player);
+                    ragdoll.world.addVelocity((float) velocity.x,
+                            (float) velocity.y, (float) velocity.z);
+                    return;
+                }
+            }
+        }
+
+        if (!RagdollConfig.liveRagdollEnabled()) return;
+        ServerPlayer target = findPushTarget(player);
+        if (target == null || isPlayerRagdolled(target.getUUID())) return;
+        Vec3 horizontalLook = new Vec3(player.getLookAngle().x, 0.0,
+                player.getLookAngle().z).normalize();
+        Vec3 pushVelocity = horizontalLook.scale(11.0).add(0.0, 7.0, 0.0);
+        RagdollInitialLimbPose pose = DeathPoseCache.take(target);
+        toggleLiveRagdoll(target, new LiveRagdollRequestPacket(
+                pose, null, 0.0, 0.0, 0.0, 0.0f, 0.0f, false,
+                (float) pushVelocity.x, (float) pushVelocity.y,
+                (float) pushVelocity.z, target.onGround()), true);
+    }
+
+    private static ServerPlayer findPushTarget(ServerPlayer pusher) {
+        Vec3 start = pusher.getEyePosition();
+        Vec3 direction = pusher.getLookAngle().normalize();
+        Vec3 end = start.add(direction.scale(3.25));
+        ServerPlayer closest = null;
+        double closestDistance = Double.POSITIVE_INFINITY;
+        for (ServerPlayer candidate : pusher.serverLevel().players()) {
+            if (candidate == pusher || !candidate.isAlive() || candidate.isSpectator()
+                    || candidate.isSleeping() || candidate.isPassenger()) continue;
+            var hit = candidate.getBoundingBox().inflate(0.25, 0.35, 0.25)
+                    .clip(start, end);
+            if (hit.isEmpty()) continue;
+            double distance = start.distanceToSqr(hit.get());
+            if (distance < closestDistance) {
+                closest = candidate;
+                closestDistance = distance;
+            }
+        }
+        return closest;
+    }
+
+    private static Vec3 throwVelocity(ServerPlayer player) {
+        Vec3 look = player.getLookAngle().normalize();
+        return look.scale(11.0).add(0.0, 3.5, 0.0);
+    }
+
+    private static void throwRagdoll(JoltPhysicsWorld world, ServerPlayer player) {
+        Vec3 velocity = throwVelocity(player);
+        world.addVelocity((float) velocity.x, (float) velocity.y,
+                (float) velocity.z);
     }
 
     public static void beginSleepRagdoll(ServerPlayer player,
@@ -675,6 +933,7 @@ public final class ServerRagdollManager {
         if (!(event.getLevel() instanceof ServerLevel level)) {
             return;
         }
+        processDamageRagdolls(level);
         startPendingSleepRagdolls(level);
         updateSleepRagdolls(level);
         if (!RagdollConfig.enabled()) {
@@ -734,12 +993,16 @@ public final class ServerRagdollManager {
         JoltPhysicsWorld.tickAll(tickingWorlds);
         RagdollSavedData savedData = RagdollSavedData.get(level);
         for (ServerRagdoll ragdoll : ragdolls.values()) {
-            RagdollPhysicsState state = ragdoll.world.captureState();
+            boolean syncState = gameTime % RAGDOLL_STATE_SYNC_INTERVAL == 0L;
+            boolean saveState = !ragdoll.live
+                    && gameTime % RAGDOLL_STATE_SAVE_INTERVAL == 0L;
+            RagdollPhysicsState state = syncState || saveState
+                    ? ragdoll.world.captureState() : null;
             if (ragdoll.live) {
                 LiveRagdollSession session = LIVE_RAGDOLLS.get(ragdoll.packet.toSnapshot().playerId());
                 ServerPlayer player = level.getServer().getPlayerList().getPlayer(
                         ragdoll.packet.toSnapshot().playerId());
-                Vec3 torso = statePosition(state);
+                Vec3 torso = ragdoll.world.torsoPosition();
                 if (session != null && player != null && player.serverLevel() == level && torso != null) {
                     player.setForcedPose(Pose.SWIMMING);
                     player.setPose(Pose.SWIMMING);
@@ -748,11 +1011,13 @@ public final class ServerRagdollManager {
                     player.hurtMarked = true;
                 }
             } else {
-                savedData.put(ragdoll.packet, state, ragdoll.ageTicks);
+                if (saveState) {
+                    savedData.put(ragdoll.packet, state, ragdoll.ageTicks);
+                }
             }
-            PacketDistributor.sendToPlayersInDimension(
-                    level,
-                    createStatePacket(ragdoll, state));
+            if (syncState) {
+                syncRagdollRecipients(level, ragdoll, state);
+            }
         }
     }
 
@@ -828,6 +1093,7 @@ public final class ServerRagdollManager {
         BY_LEVEL.clear();
         PHYSICS_GUN_GRABS.clear();
         PHYSICS_GUN_ATTEMPTS.clear();
+        DAMAGE_RAGDOLL_PENDING.clear();
     }
 
     public static void onServerStarted(ServerStartedEvent event) {
@@ -1164,11 +1430,48 @@ public final class ServerRagdollManager {
             return;
         }
         for (ServerRagdoll ragdoll : ragdolls.values()) {
+            Vec3 position = ragdoll.world.torsoPosition();
+            if (!shouldTrackRagdoll(player, ragdoll, position)) continue;
             PacketDistributor.sendToPlayer(player, ragdoll.packet);
-            PacketDistributor.sendToPlayer(
-                    player,
+            PacketDistributor.sendToPlayer(player,
                     createStatePacket(ragdoll, ragdoll.world.captureState()));
+            ragdoll.trackingPlayers.add(player.getUUID());
         }
+    }
+
+    private static void syncRagdollRecipients(ServerLevel level,
+                                               ServerRagdoll ragdoll,
+                                               RagdollPhysicsState state) {
+        Vec3 position = statePosition(state);
+        if (position == null) return;
+        RagdollStatePacket statePacket = createStatePacket(ragdoll, state);
+        for (ServerPlayer player : level.players()) {
+            boolean shouldTrack = shouldTrackRagdoll(player, ragdoll, position);
+            boolean wasTracking = ragdoll.trackingPlayers.contains(player.getUUID());
+            if (shouldTrack) {
+                if (!wasTracking) {
+                    PacketDistributor.sendToPlayer(player, ragdoll.packet);
+                    ragdoll.trackingPlayers.add(player.getUUID());
+                }
+                PacketDistributor.sendToPlayer(player, statePacket);
+            } else if (wasTracking) {
+                PacketDistributor.sendToPlayer(player,
+                        new RagdollRemovePacket(ragdoll.packet.ragdollId()));
+                ragdoll.trackingPlayers.remove(player.getUUID());
+            }
+        }
+        ragdoll.trackingPlayers.removeIf(playerId -> {
+            ServerPlayer player = level.getServer().getPlayerList().getPlayer(playerId);
+            return player == null || player.serverLevel() != level;
+        });
+    }
+
+    private static boolean shouldTrackRagdoll(ServerPlayer player,
+                                              ServerRagdoll ragdoll,
+                                              Vec3 position) {
+        UUID ownerId = ragdoll.packet.toSnapshot().playerId();
+        return player.getUUID().equals(ownerId)
+                || player.distanceToSqr(position) <= RAGDOLL_SYNC_DISTANCE_SQUARED;
     }
 
     private static RagdollStatePacket createStatePacket(
@@ -1289,10 +1592,7 @@ public final class ServerRagdollManager {
                     new ServerRagdoll(stored.packet(), world);
             ragdoll.ageTicks = stored.ageTicks();
             ragdolls.put(ragdollId, ragdoll);
-            PacketDistributor.sendToPlayersInDimension(
-                    level, stored.packet());
-            PacketDistributor.sendToPlayersInDimension(
-                    level, createStatePacket(ragdoll, stored.state()));
+            syncRagdollRecipients(level, ragdoll, stored.state());
             RagdollMod.LOGGER.info(
                     "Restored saved Jolt ragdoll {} in {}",
                     ragdollId,
@@ -1359,6 +1659,7 @@ public final class ServerRagdollManager {
         private long lastControlTick;
         private long ageTicks;
         private long stateSequence;
+        private final Set<UUID> trackingPlayers = new HashSet<>();
         private boolean paused;
         private RagdollPhysicsState unloadedState;
         private final boolean live;

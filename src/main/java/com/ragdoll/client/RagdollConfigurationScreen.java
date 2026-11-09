@@ -21,7 +21,27 @@ import java.util.function.Supplier;
 /** GUI-only grouping: keep the existing TOML paths and saved values intact. */
 public final class RagdollConfigurationScreen extends ConfigurationSectionScreen {
     private static final List<String> BASIC_KEYS = List.of("maxRagdolls", "despawnSeconds", "selfCollision",
-            "renderCape", "render3dSkin", "renderHd3dSkin");
+            "renderCape", "render3dSkin", "renderHd3dSkin", "showPartRigidBodies",
+            "showEntityInteractionBody", "gravity", "massScale",
+            "initialVelocityScale", "playerPushStrength", "explosionStrength", "friction",
+            "linearDamping", "angularDamping", "restitution");
+    private static final List<String> LIVE_TRIGGER_KEYS = List.of(
+            "damageEnabled",
+            "entityDamageEnabled", "entityDamageThreshold",
+            "fallDamageEnabled", "fallDamageThreshold",
+            "explosionDamageEnabled", "explosionDamageThreshold",
+            "wallImpactEnabled", "wallImpactThreshold",
+            "heavyHitEnabled", "heavyHitThreshold",
+            "lightningEnabled", "lightningThreshold",
+            "entityDamageForce", "fallForce", "explosionForce",
+            "wallImpactForce", "heavyHitForce", "lightningForce");
+    private static final List<TriggerGroup> TRIGGER_GROUPS = List.of(
+            new TriggerGroup("entityAttack", "entityDamageEnabled", "entityDamageForce"),
+            new TriggerGroup("fall", "fallDamageEnabled", "fallForce"),
+            new TriggerGroup("explosion", "explosionDamageEnabled", "explosionForce"),
+            new TriggerGroup("wallImpact", "wallImpactEnabled", "wallImpactForce"),
+            new TriggerGroup("heavyHit", "heavyHitEnabled", "heavyHitForce"),
+            new TriggerGroup("lightning", "lightningEnabled", "lightningForce"));
 
     public RagdollConfigurationScreen(Screen parent, ModConfig.Type type, ModConfig config, Component title) {
         super(groupBasicSettings(Context.top(config.getModId(), parent, config, (c, k, e) -> e)), title);
@@ -34,11 +54,34 @@ public final class RagdollConfigurationScreen extends ConfigurationSectionScreen
     private static Context groupBasicSettings(Context original) {
         Config basicValues = Config.inMemory();
         Config basicSpecs = Config.inMemory();
+        Config triggerValues = Config.inMemory();
+        Config triggerSpecs = Config.inMemory();
+        Config liveValues = Config.inMemory();
+        Config liveSpecs = Config.inMemory();
         for (String key : BASIC_KEYS) {
             boolean exists = original.entries().stream().anyMatch(entry -> entry.getKey().equals(key));
             if (!exists) continue;
             basicValues.set(key, original.modSpec().getValues().getRaw(key));
             basicSpecs.set(key, original.valueSpecs().get(key));
+        }
+        boolean serverConfig = original.modConfig().getType() == ModConfig.Type.SERVER;
+        UnmodifiableConfig liveValueCategory = serverConfig
+                ? original.modSpec().getValues().get("livePlayerRagdoll") : null;
+        Object liveSpecObject = serverConfig
+                ? original.valueSpecs().get("livePlayerRagdoll") : null;
+        UnmodifiableConfig liveSpecCategory = liveSpecObject instanceof UnmodifiableConfig config
+                ? config : null;
+        if (liveValueCategory != null && liveSpecCategory != null) {
+            for (UnmodifiableConfig.Entry entry : liveValueCategory.entrySet()) {
+                String key = entry.getKey();
+                if (LIVE_TRIGGER_KEYS.contains(key)) {
+                    triggerValues.set(key, entry.getRawValue());
+                    triggerSpecs.set(key, liveSpecCategory.get(key));
+                } else {
+                    liveValues.set(key, entry.getRawValue());
+                    liveSpecs.set(key, liveSpecCategory.get(key));
+                }
+            }
         }
         var entries = new LinkedHashSet<UnmodifiableConfig.Entry>();
         original.entries().stream()
@@ -52,10 +95,23 @@ public final class RagdollConfigurationScreen extends ConfigurationSectionScreen
             entries.addAll(category.entrySet());
         }
         for (String key : List.of("sleepRagdoll", "livePlayerRagdoll", "corpseRagdoll")) {
-            original.entries().stream().filter(e -> e.getKey().equals(key)).forEach(entries::add);
+            if (key.equals("livePlayerRagdoll") && !triggerValues.isEmpty()) {
+                Config category = Config.inMemory();
+                category.set(key, liveValues);
+                entries.addAll(category.entrySet());
+            } else {
+                original.entries().stream().filter(e -> e.getKey().equals(key)).forEach(entries::add);
+            }
+            if (key.equals("livePlayerRagdoll") && !triggerValues.isEmpty()) {
+                Config category = Config.inMemory();
+                category.set("triggers", triggerValues);
+                entries.addAll(category.entrySet());
+            }
         }
         var specs = new LinkedHashMap<>(original.valueSpecs());
         if (!basicValues.isEmpty()) specs.put("basicSettings", basicSpecs);
+        if (!triggerValues.isEmpty()) specs.put("triggers", triggerSpecs);
+        if (!liveValues.isEmpty()) specs.put("livePlayerRagdoll", liveSpecs);
         return new Context(original.modId(), original.parent(), original.modConfig(), original.modSpec(),
                 entries, specs, original.keylist(), original.filter());
     }
@@ -64,19 +120,45 @@ public final class RagdollConfigurationScreen extends ConfigurationSectionScreen
     protected Element createSection(String key, UnmodifiableConfig specs, UnmodifiableConfig values) {
         // NightConfig's default maps do not preserve insertion order. Order the actual UI entries explicitly.
         Set<? extends UnmodifiableConfig.Entry> entries = values.entrySet();
+        var sectionSpecs = specs.valueMap();
         if (key.equals("basicSettings")) {
             var ordered = new LinkedHashSet<UnmodifiableConfig.Entry>();
             for (String basicKey : BASIC_KEYS) {
                 entries.stream().filter(e -> e.getKey().equals(basicKey)).forEach(ordered::add);
             }
             entries = ordered;
+        } else if (key.equals("triggers")
+                && context.modConfig().getType() == ModConfig.Type.SERVER) {
+            var ordered = new LinkedHashSet<UnmodifiableConfig.Entry>();
+            entries.stream().filter(e -> e.getKey().equals("damageEnabled"))
+                    .forEach(ordered::add);
+            var groupedSpecs = new LinkedHashMap<>(sectionSpecs);
+            for (TriggerGroup group : TRIGGER_GROUPS) {
+                Config groupValues = Config.inMemory();
+                Config groupSpecs = Config.inMemory();
+                for (String field : List.of(group.enabledKey(), group.forceKey())) {
+                    if (values.contains(field)) {
+                        groupValues.set(field, values.get(field));
+                        groupSpecs.set(field, specs.get(field));
+                    }
+                }
+                if (!groupValues.isEmpty()) {
+                    Config groupCategory = Config.inMemory();
+                    groupCategory.set(group.key(), groupValues);
+                    ordered.addAll(groupCategory.entrySet());
+                    groupedSpecs.put(group.key(), groupSpecs);
+                }
+            }
+            entries = ordered;
+            sectionSpecs = groupedSpecs;
         }
         final var sectionEntries = entries;
+        final var childSpecs = sectionSpecs;
         return new Element(getTranslationComponent(key), getTooltipComponent(key, null),
                 Button.builder(Component.translatable(getTranslationKey(key) + ".button"), button ->
                         minecraft.setScreen(sectionCache.computeIfAbsent(key, k ->
                                 new RagdollConfigurationScreen(Context.section(context, this, sectionEntries,
-                                        specs.valueMap(), key), Component.translatable(getTranslationKey(key))))))
+                                        childSpecs, key), Component.translatable(getTranslationKey(key))))))
                         .tooltip(Tooltip.create(getTooltipComponent(key, null))).build(), false);
     }
 
@@ -102,6 +184,9 @@ public final class RagdollConfigurationScreen extends ConfigurationSectionScreen
         super.onChanged(key);
         // Also refresh after undo/reset, not just direct clicks, so the dependency is immediate.
         if (key.equals("render3dSkin")) rebuild();
+    }
+
+    private record TriggerGroup(String key, String enabledKey, String forceKey) {
     }
 
 }

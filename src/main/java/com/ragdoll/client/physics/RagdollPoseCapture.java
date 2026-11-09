@@ -76,15 +76,22 @@ public final class RagdollPoseCapture {
 
     private static RagdollInitialLimbPose capture(PlayerModel<?> model) {
         return new RagdollInitialLimbPose(
-                capture(model.body), capture(model.head),
-                capture(model.leftArm), capture(model.rightArm),
-                capture(model.leftLeg), capture(model.rightLeg),
+                capture(model.body, 0.0f, 0.0f, 0.0f),
+                capture(model.head, 0.0f, 0.0f, 0.0f),
+                capture(model.leftArm, 5.0f, 2.0f, 0.0f),
+                capture(model.rightArm, -5.0f, 2.0f, 0.0f),
+                capture(model.leftLeg, 1.9f, 12.0f, 0.0f),
+                capture(model.rightLeg, -1.9f, 12.0f, 0.0f),
                 0.0f, 0.0f, 0.0f);
     }
 
     private static RagdollInitialLimbPose.PartPose capture(
-            net.minecraft.client.model.geom.ModelPart part) {
-        return new RagdollInitialLimbPose.PartPose(part.x, part.y, part.z,
+            net.minecraft.client.model.geom.ModelPart part,
+            float vanillaX, float vanillaY, float vanillaZ) {
+        // Animation/resource-pack mods may move model pivots for their own
+        // third-person renderer. Ragdoll joint anchors must stay on the
+        // vanilla player skeleton; preserve only the animated rotations.
+        return new RagdollInitialLimbPose.PartPose(vanillaX, vanillaY, vanillaZ,
                 part.xRot, part.yRot, part.zRot);
     }
 

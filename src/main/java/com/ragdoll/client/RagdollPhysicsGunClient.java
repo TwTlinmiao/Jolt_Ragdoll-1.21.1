@@ -235,6 +235,20 @@ public final class RagdollPhysicsGunClient {
         rotationMode = false;
     }
 
+    public static void clearGrabAfterThrow() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (leftDown || rotationMode || isLocalPlayerTrying(minecraft)
+                || isLocalPlayerGrabbing(minecraft)) {
+            stopGrabAttempt();
+        }
+        if (minecraft.player != null) {
+            UUID localId = minecraft.player.getUUID();
+            ACTIVE_GRABS.remove(localId);
+            TRYING_PLAYERS.remove(localId);
+        }
+        rotationMode = false;
+    }
+
     private static void resetLocalState() {
         leftDown = false;
         rotationMode = false;

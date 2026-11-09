@@ -621,7 +621,13 @@ public final class ClientPhysicsRuntime {
                 closestHit = hit;
             }
         }
-        return closestRagdoll == null ? null : new ActiveGrab(closestRagdoll, closestHit.part(), closestHit.distance(), closestHit.hitX(), closestHit.hitY(), closestHit.hitZ());
+        return closestRagdoll == null ? null : new ActiveGrab(
+                closestRagdoll,
+                closestHit.part(),
+                closestHit.distance(),
+                closestHit.hitX(),
+                closestHit.hitY(),
+                closestHit.hitZ());
     }
 
     private static void releaseGrab() {
@@ -633,6 +639,10 @@ public final class ClientPhysicsRuntime {
             activeGrab.ragdoll.world.releaseGrab();
             activeGrab = null;
         }
+    }
+
+    public static void clearGrabAfterThrow() {
+        releaseGrab();
     }
 
     private static void removeExpiredRagdolls() {
@@ -925,7 +935,15 @@ public final class ClientPhysicsRuntime {
             boolean slim = resolvedSkin == null ? ragdoll.slim : resolvedSkin.model() == PlayerSkin.Model.SLIM;
             ResourceLocation elytraTexture = resolvedSkin != null ? resolvedSkin.elytraTexture() : ragdoll.elytraTexture;
             ResourceLocation capeTexture = resolvedSkin != null ? resolvedSkin.capeTexture() : ragdoll.capeTexture;
-            result.add(new RagdollRenderState(ragdoll.id, ragdoll.playerId, ragdoll.modelScale, texture, slim, elytraTexture, capeTexture, ragdoll.shownModelParts, ragdoll.helmet, ragdoll.chestplate, ragdoll.leggings, ragdoll.boots, ragdoll.mainArmLeft, ragdoll.mainHand, ragdoll.offHand, ragdoll.accessories, fadeAlpha(ragdoll.ageTicks, isCompanionPlayerRagdoll(ragdoll) ? 0L : RagdollConfig.despawnTicks()), parts));
+            result.add(new RagdollRenderState(ragdoll.id, ragdoll.playerId,
+                    ragdoll.modelScale, texture, slim, elytraTexture, capeTexture,
+                    ragdoll.shownModelParts, ragdoll.helmet, ragdoll.chestplate,
+                    ragdoll.leggings, ragdoll.boots, ragdoll.mainArmLeft,
+                    ragdoll.mainHand, ragdoll.offHand, ragdoll.accessories,
+                    fadeAlpha(ragdoll.ageTicks,
+                            isCompanionPlayerRagdoll(ragdoll)
+                                    ? 0L : RagdollConfig.despawnTicks()),
+                    ragdoll.world.getEntityInteractionRenderBounds(partialTick), parts));
         }
         return result;
     }
@@ -1352,7 +1370,17 @@ public final class ClientPhysicsRuntime {
         }
     }
 
-    public record RagdollRenderState(UUID owner, UUID playerId, float modelScale, ResourceLocation texture, boolean slim, ResourceLocation elytraTexture, ResourceLocation capeTexture, int shownModelParts, ItemStack helmet, ItemStack chestplate, ItemStack leggings, ItemStack boots, boolean mainArmLeft, ItemStack mainHand, ItemStack offHand, RagdollAccessorySnapshot accessories, float fadeAlpha, List<RagdollPartRenderState> parts) {
+    public record RagdollRenderState(UUID owner, UUID playerId, float modelScale,
+                                     ResourceLocation texture, boolean slim,
+                                     ResourceLocation elytraTexture,
+                                     ResourceLocation capeTexture,
+                                     int shownModelParts, ItemStack helmet,
+                                     ItemStack chestplate, ItemStack leggings,
+                                     ItemStack boots, boolean mainArmLeft,
+                                     ItemStack mainHand, ItemStack offHand,
+                                     RagdollAccessorySnapshot accessories,
+                                     float fadeAlpha, AABB entityInteractionBounds,
+                                     List<RagdollPartRenderState> parts) {
     }
 
 }

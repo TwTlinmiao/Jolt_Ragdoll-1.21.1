@@ -106,14 +106,12 @@ final class JoltPhysicsWorld implements AutoCloseable {
 
     private static final int MAX_LOG_TICKS = 300;
 
-    private static final int SETTLED_TICKS_BEFORE_SLEEP = 20;
-
-    private static final float MAX_SETTLED_LINEAR_SPEED = 0.25f;
+    private static final float MAX_SLEEP_LINEAR_SPEED = 0.01f;
 
     // Stay below the addon's 30 blocks/second follower limit after repeated hits.
     private static final float MAX_CONTROLLED_KNOCKBACK_SPEED = 28.0f;
 
-    private static final float MAX_SETTLED_ANGULAR_SPEED = 0.75f;
+    private static final float MAX_SLEEP_ANGULAR_SPEED = 0.02f;
 
     private static final float PHYSICS_GUN_LINEAR_STIFFNESS = 250.0f;
 
@@ -136,14 +134,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
     private static final int IMPACT_PARTICLE_COOLDOWN_TICKS = 10;
 
     private static final double IMPACT_BLOCK_SEARCH_PADDING = 0.08;
-
-    private static final float TORSO_MASS = 32.0f;
-
-    private static final float HEAD_MASS = 8.0f;
-
-    private static final float ARM_MASS = 4.0f;
-
-    private static final float LEG_MASS = 8.0f;
 
     private static final float WATER_BUOYANCY_SCALE = 1.55f;
 
@@ -222,29 +212,41 @@ final class JoltPhysicsWorld implements AutoCloseable {
 
     private static final float INITIAL_VELOCITY_SCALE = 0.4f;
 
+    private static final float INITIAL_ARTICULATION_PER_SPEED = 1.6f;
+
+    private static final float INITIAL_ARTICULATION_MIN_SPEED = 2.0f;
+
+    private static final float INITIAL_ARTICULATION_MAX_ANGULAR_SPEED = 6.0f;
+
+    private static final double PLAYER_PUSH_VERTICAL_SCALE = 0.15;
+
+    private static final float LIVE_RAGDOLL_CONTROL_TORQUE = 4.5f;
+
+    private static final float LIVE_RAGDOLL_MAX_ANGULAR_SPEED = 12.0f;
+
+    private static final double LIVE_HAND_CONTACT_DISTANCE = 0.22;
+
     private static final double PLAYER_PUSH_STRENGTH = 4.0;
 
     private static final double PLAYER_PUSH_BIAS_PER_DEPTH = 12.0;
 
-    private static final double PLAYER_PUSH_SPEED_TRANSFER = 2.5;
+    private static final double PLAYER_PUSH_SPEED_TRANSFER = 0.35;
 
-    private static final double PLAYER_PUSH_MAX_BIAS_SPEED = 1.4;
+    private static final double PLAYER_PUSH_MAX_BIAS_SPEED = 0.35;
 
-    private static final double PLAYER_PUSH_MAX_IMPULSE = 36.0;
+    private static final double PLAYER_PUSH_MAX_IMPULSE = 3.0;
 
     private static final double PLAYER_PUSH_TANGENT_FRICTION = 0.12;
 
-    private static final double PLAYER_PUSH_IMPULSE_BUDGET = 54.0;
+    private static final double PLAYER_PUSH_IMPULSE_BUDGET = 4.0;
 
-    private static final double PLAYER_PUSH_VERTICAL_SCALE = 0.15;
+    private static final double PLAYER_PUSH_VELOCITY_TRANSFER = 0.2;
 
     private static final double PLAYER_PUSH_AXIS_EPSILON = 1.0e-8;
 
-    private static final float ATTACK_IMPULSE = 28.0f;
+    private static final float ATTACK_IMPULSE = 1.5f;
 
-    private static final float ATTACK_UPWARD_IMPULSE = 4.0f;
-
-    private static final float GRAB_TARGET_MAX_SPEED = 3.0f;
+    private static final float GRAB_TARGET_MAX_SPEED = 24.0f;
 
     private static final float GRAB_TARGET_HALF_EXTENT = 0.02f;
 
@@ -344,8 +346,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
 
     private int clientTicks;
 
-    private int settledTicks;
-
     private int impactParticleCooldownTicks;
 
     private float fluidFaceTargetSign;
@@ -378,6 +378,18 @@ final class JoltPhysicsWorld implements AutoCloseable {
     private BoxShape grabTargetShape;
 
     private int grabTargetBodyId = NO_TERRAIN_BODY;
+
+    private final int[] liveHandTargetBodyIds = {NO_TERRAIN_BODY, NO_TERRAIN_BODY};
+
+    private final TwoBodyConstraint[] liveHandConstraints = new TwoBodyConstraint[2];
+
+    private boolean liveLeftHandPressed;
+
+    private boolean liveRightHandPressed;
+
+    private float liveStrafe;
+
+    private float liveForward;
 
     private boolean closed;
 
@@ -466,7 +478,7 @@ final class JoltPhysicsWorld implements AutoCloseable {
             jobSystem = JoltBootstrap.acquireSharedJobSystem();
             physicsSystem = new PhysicsSystem();
             physicsSystem.init(8_192, 0, 16_384, 16_384, layerMap, broadPhaseFilter, objectLayerFilter);
-            physicsSystem.setGravity(0.0f, -9.81f, 0.0f);
+            physicsSystem.setGravity(0.0f, -RagdollConfig.physicsGravity(), 0.0f);
             bodyInterface = physicsSystem.getBodyInterface();
             RagdollMod.LOGGER.info("Created shared Jolt ragdoll physics world for {}", level.dimension().location());
         }
@@ -543,7 +555,7 @@ final class JoltPhysicsWorld implements AutoCloseable {
         double safeRequestedScale = safeModelScale(requestedModelScale);
         modelScale = safeRequestedScale;
         double modelMassScale = modelScale * modelScale * modelScale;
-        massScale = (float) Math.max(0.35, modelMassScale);
+        massScale = (float) Math.max(0.35, modelMassScale * RagdollConfig.physicsMassScale());
         spawnYawRadians = initialLimbPose == null
                 ? (float) Math.toRadians(yaw)
                 : initialLimbPose.rendererBodyYaw();
@@ -711,13 +723,37 @@ final class JoltPhysicsWorld implements AutoCloseable {
     }
 
     private void applyInitialLooseMotion(RagdollPart torsoPart, RagdollPart head, RagdollPart leftArm, RagdollPart rightArm, RagdollPart leftLeg, RagdollPart rightLeg, float baseVelocityX, float baseVelocityY, float baseVelocityZ) {
-        float velocityX = baseVelocityX * INITIAL_VELOCITY_SCALE;
-        float velocityY = baseVelocityY * INITIAL_VELOCITY_SCALE;
-        float velocityZ = baseVelocityZ * INITIAL_VELOCITY_SCALE;
+        float velocityX = baseVelocityX * RagdollConfig.physicsInitialVelocityScale();
+        float velocityY = baseVelocityY * RagdollConfig.physicsInitialVelocityScale();
+        float velocityZ = baseVelocityZ * RagdollConfig.physicsInitialVelocityScale();
         // Give every part the same initial translation so the joints do not
         // have to accelerate stationary limbs to catch up with the torso.
         for (RagdollPart part : List.of(torsoPart, head, leftArm, rightArm, leftLeg, rightLeg)) {
             bodyInterface.setLinearVelocity(part.bodyId, velocityX, velocityY, velocityZ);
+        }
+        double speed = Math.sqrt(velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ);
+        if (speed < INITIAL_ARTICULATION_MIN_SPEED) {
+            return;
+        }
+
+        RVec3 torsoPosition = bodyInterface.getPosition(torsoPart.bodyId);
+        for (RagdollPart part : List.of(head, leftArm, rightArm, leftLeg, rightLeg)) {
+            RVec3 partPosition = bodyInterface.getPosition(part.bodyId);
+            double offsetX = partPosition.xx() - torsoPosition.xx();
+            double offsetY = partPosition.yy() - torsoPosition.yy();
+            double offsetZ = partPosition.zz() - torsoPosition.zz();
+            double angularX = (offsetY * velocityZ - offsetZ * velocityY) * INITIAL_ARTICULATION_PER_SPEED;
+            double angularY = (offsetZ * velocityX - offsetX * velocityZ) * INITIAL_ARTICULATION_PER_SPEED;
+            double angularZ = (offsetX * velocityY - offsetY * velocityX) * INITIAL_ARTICULATION_PER_SPEED;
+            double angularSpeed = Math.sqrt(angularX * angularX + angularY * angularY + angularZ * angularZ);
+            if (angularSpeed > INITIAL_ARTICULATION_MAX_ANGULAR_SPEED) {
+                double scale = INITIAL_ARTICULATION_MAX_ANGULAR_SPEED / angularSpeed;
+                angularX *= scale;
+                angularY *= scale;
+                angularZ *= scale;
+            }
+            bodyInterface.setAngularVelocity(part.bodyId,
+                    new Vec3((float) angularX, (float) angularY, (float) angularZ));
         }
     }
 
@@ -781,13 +817,18 @@ final class JoltPhysicsWorld implements AutoCloseable {
         return false;
     }
 
-    boolean pushFromPlayer(AABB playerBounds, double velocityX, double velocityY, double velocityZ, double movementX, double movementZ) {
-        double horizontalSpeed = Math.max(Math.sqrt(velocityX * velocityX + velocityZ * velocityZ), Math.sqrt(movementX * movementX + movementZ * movementZ));
+    boolean pushFromPlayer(AABB playerBounds, double velocityX, double velocityY,
+                           double velocityZ, double movementX, double movementZ) {
+        double horizontalSpeed = Math.max(
+                Math.sqrt(velocityX * velocityX + velocityZ * velocityZ),
+                Math.sqrt(movementX * movementX + movementZ * movementZ));
         if (horizontalSpeed <= 0.01) {
             return false;
         }
-        double directionX = Math.abs(velocityX) + Math.abs(velocityZ) >= Math.abs(movementX) + Math.abs(movementZ) ? velocityX : movementX;
-        double directionZ = Math.abs(velocityX) + Math.abs(velocityZ) >= Math.abs(movementX) + Math.abs(movementZ) ? velocityZ : movementZ;
+        double directionX = Math.abs(velocityX) + Math.abs(velocityZ)
+                >= Math.abs(movementX) + Math.abs(movementZ) ? velocityX : movementX;
+        double directionZ = Math.abs(velocityX) + Math.abs(velocityZ)
+                >= Math.abs(movementX) + Math.abs(movementZ) ? velocityZ : movementZ;
         double directionLength = Math.sqrt(directionX * directionX + directionZ * directionZ);
         directionX /= directionLength;
         directionZ /= directionLength;
@@ -795,16 +836,20 @@ final class JoltPhysicsWorld implements AutoCloseable {
         List<PushContact> contacts = new ArrayList<>();
         for (RagdollPart part : parts) {
             double[] center = collisionCenter(part);
-            PushBody partBody = new PushBody(center[0], center[1], center[2], part.rotationX, part.rotationY, part.rotationZ, part.rotationW, part.halfX, part.halfY, part.halfZ);
+            PushBody partBody = new PushBody(center[0], center[1], center[2],
+                    part.rotationX, part.rotationY, part.rotationZ, part.rotationW,
+                    part.halfX, part.halfY, part.halfZ);
             PushContact contact = pushContact(playerBody, partBody);
             if (contact != null) {
-                contacts.add(new PushContact(part, contact.normal, contact.point, contact.penetration));
+                contacts.add(new PushContact(part, contact.normal, contact.point,
+                        contact.penetration));
             }
         }
         if (contacts.isEmpty()) {
             return false;
         }
-        contacts.sort((first, second) -> Double.compare(second.penetration, first.penetration));
+        contacts.sort((first, second) ->
+                Double.compare(second.penetration, first.penetration));
         double remainingBudget = PLAYER_PUSH_IMPULSE_BUDGET * PLAYER_PUSH_STRENGTH;
         boolean pushed = false;
         for (PushContact contact : contacts) {
@@ -813,23 +858,34 @@ final class JoltPhysicsWorld implements AutoCloseable {
             }
             RagdollPart part = contact.part;
             Vec3 bodyVelocity = velocityAtPoint(part, contact.point);
-            Vec3 relativeVelocity = new Vec3(bodyVelocity.getX() - (float) velocityX, bodyVelocity.getY() - (float) velocityY, bodyVelocity.getZ() - (float) velocityZ);
+            Vec3 relativeVelocity = new Vec3(
+                    bodyVelocity.getX() - (float) velocityX,
+                    bodyVelocity.getY() - (float) velocityY,
+                    bodyVelocity.getZ() - (float) velocityZ);
             Vec3 normal = contact.normal;
-            double normalSpeed = relativeVelocity.getX() * normal.getX() + relativeVelocity.getY() * normal.getY() + relativeVelocity.getZ() * normal.getZ();
-            double desiredSpeed = Math.min(PLAYER_PUSH_MAX_BIAS_SPEED * PLAYER_PUSH_STRENGTH, (contact.penetration * PLAYER_PUSH_BIAS_PER_DEPTH + horizontalSpeed * PLAYER_PUSH_SPEED_TRANSFER) * PLAYER_PUSH_STRENGTH);
+            double normalSpeed = relativeVelocity.getX() * normal.getX()
+                    + relativeVelocity.getY() * normal.getY()
+                    + relativeVelocity.getZ() * normal.getZ();
+            double desiredSpeed = Math.min(PLAYER_PUSH_MAX_BIAS_SPEED * PLAYER_PUSH_STRENGTH,
+                    (contact.penetration * PLAYER_PUSH_BIAS_PER_DEPTH
+                            + horizontalSpeed * PLAYER_PUSH_SPEED_TRANSFER)
+                            * PLAYER_PUSH_STRENGTH);
             if (normalSpeed >= desiredSpeed) {
                 continue;
             }
-            double impulseMagnitude = Math.min(PLAYER_PUSH_MAX_IMPULSE * PLAYER_PUSH_STRENGTH, Math.max(0.0, desiredSpeed - normalSpeed) * partMass(part.name));
+            double impulseMagnitude = Math.min(PLAYER_PUSH_MAX_IMPULSE * PLAYER_PUSH_STRENGTH,
+                    Math.max(0.0, desiredSpeed - normalSpeed) * partMass(part.name));
             double impulseX = normal.getX() * impulseMagnitude;
             double impulseY = normal.getY() * impulseMagnitude;
             double impulseZ = normal.getZ() * impulseMagnitude;
             double tangentX = relativeVelocity.getX() - normal.getX() * normalSpeed;
             double tangentY = relativeVelocity.getY() - normal.getY() * normalSpeed;
             double tangentZ = relativeVelocity.getZ() - normal.getZ() * normalSpeed;
-            double tangentSpeed = Math.sqrt(tangentX * tangentX + tangentY * tangentY + tangentZ * tangentZ);
+            double tangentSpeed = Math.sqrt(tangentX * tangentX
+                    + tangentY * tangentY + tangentZ * tangentZ);
             if (tangentSpeed > 1.0e-6 && impulseMagnitude > 0.0) {
-                double friction = Math.min(tangentSpeed * partMass(part.name), impulseMagnitude * PLAYER_PUSH_TANGENT_FRICTION) / tangentSpeed;
+                double friction = Math.min(tangentSpeed * partMass(part.name),
+                        impulseMagnitude * PLAYER_PUSH_TANGENT_FRICTION) / tangentSpeed;
                 impulseX -= tangentX * friction;
                 impulseY -= tangentY * friction;
                 impulseZ -= tangentZ * friction;
@@ -841,7 +897,8 @@ final class JoltPhysicsWorld implements AutoCloseable {
             impulseX = directionX * along;
             impulseY *= PLAYER_PUSH_VERTICAL_SCALE;
             impulseZ = directionZ * along;
-            double length = Math.sqrt(impulseX * impulseX + impulseY * impulseY + impulseZ * impulseZ);
+            double length = Math.sqrt(impulseX * impulseX
+                    + impulseY * impulseY + impulseZ * impulseZ);
             if (length > remainingBudget) {
                 double scale = remainingBudget / length;
                 impulseX *= scale;
@@ -850,12 +907,10 @@ final class JoltPhysicsWorld implements AutoCloseable {
                 length = remainingBudget;
             }
             activateAllParts();
-            bodyInterface.addImpulse(part.bodyId, new Vec3((float) impulseX, (float) impulseY, (float) impulseZ));
+            bodyInterface.addImpulse(part.bodyId, new Vec3(
+                    (float) impulseX, (float) impulseY, (float) impulseZ));
             remainingBudget -= length;
             pushed = true;
-        }
-        if (pushed) {
-            settledTicks = 0;
         }
         return pushed;
     }
@@ -1016,6 +1071,10 @@ final class JoltPhysicsWorld implements AutoCloseable {
 
     void finishPhysicsGunTargetUpdate() {
         physicsGunControls.values().removeIf(control -> !control.updated);
+    }
+
+    void clearPhysicsGunControl(UUID controllerId) {
+        physicsGunControls.remove(controllerId);
     }
 
     boolean setPhysicsGunTarget(
@@ -1220,7 +1279,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
             }
         }
         bodyInterface.activateBody(part.bodyId);
-        settledTicks = 0;
     }
 
     boolean freezePhysicsGunPart(String partName) {
@@ -1256,10 +1314,10 @@ final class JoltPhysicsWorld implements AutoCloseable {
             // Scale impulse by mass to apply the target velocity change equally
             // across limbs with different masses.
             float mass = partMass(part.name);
-            bodyInterface.addImpulse(part.bodyId, new Vec3((float) velocity.x() * mass,
-                    (float) velocity.y() * mass, (float) velocity.z() * mass));
+            float explosionScale = RagdollConfig.physicsExplosionStrength();
+            bodyInterface.addImpulse(part.bodyId, new Vec3((float) velocity.x() * mass * explosionScale,
+                    (float) velocity.y() * mass * explosionScale, (float) velocity.z() * mass * explosionScale));
             bodyInterface.activateBody(part.bodyId);
-            settledTicks = 0;
         }
     }
 
@@ -1292,9 +1350,14 @@ final class JoltPhysicsWorld implements AutoCloseable {
         if (!parts.contains(part)) {
             return false;
         }
-        bodyInterface.addImpulse(part.bodyId, new Vec3((float) directionX * ATTACK_IMPULSE, (float) directionY * ATTACK_IMPULSE + ATTACK_UPWARD_IMPULSE, (float) directionZ * ATTACK_IMPULSE), new RVec3(hitX - localOrigin.getX(), hitY - localOrigin.getY(), hitZ - localOrigin.getZ()));
+        bodyInterface.addImpulse(part.bodyId, new Vec3(
+                (float) directionX * ATTACK_IMPULSE,
+                (float) directionY * ATTACK_IMPULSE,
+                (float) directionZ * ATTACK_IMPULSE),
+                new RVec3(hitX - localOrigin.getX(),
+                        hitY - localOrigin.getY(),
+                        hitZ - localOrigin.getZ()));
         bodyInterface.activateBody(part.bodyId);
-        settledTicks = 0;
         return true;
     }
 
@@ -1342,7 +1405,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
         applyGrabPhysics();
         activateAllParts();
         bodyInterface.activateBody(grabTargetBodyId);
-        settledTicks = 0;
         return true;
     }
 
@@ -1363,7 +1425,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
         if (!frozen) {
             bodyInterface.activateBody(part.bodyId);
         }
-        settledTicks = 0;
     }
 
     boolean updateGrab(String partName, double grabX, double grabY, double grabZ,
@@ -1380,7 +1441,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
         moveGrabTargetBody(new net.minecraft.world.phys.Vec3(grabTargetX, grabTargetY, grabTargetZ));
         activateAllParts();
         bodyInterface.activateBody(grabTargetBodyId);
-        settledTicks = 0;
         return true;
     }
 
@@ -1388,11 +1448,16 @@ final class JoltPhysicsWorld implements AutoCloseable {
         if (grabTargetBodyId != NO_TERRAIN_BODY) {
             return;
         }
-        if (grabTargetShape == null) {
-            grabTargetShape = new BoxShape(new Vec3(GRAB_TARGET_HALF_EXTENT, GRAB_TARGET_HALF_EXTENT, GRAB_TARGET_HALF_EXTENT), 0.0f);
-        }
+        ensureGrabTargetShape();
         try (BodyCreationSettings settings = new BodyCreationSettings().setShape(grabTargetShape).setPosition(target.x - localOrigin.getX(), target.y - localOrigin.getY(), target.z - localOrigin.getZ()).setRotation(Quat.sIdentity()).setMotionType(EMotionType.Kinematic).setObjectLayer(OBJECT_LAYER_GHOST)) {
             grabTargetBodyId = bodyInterface.createAndAddBody(settings, EActivation.Activate);
+        }
+    }
+
+    private void ensureGrabTargetShape() {
+        if (grabTargetShape == null) {
+            grabTargetShape = new BoxShape(new Vec3(GRAB_TARGET_HALF_EXTENT,
+                    GRAB_TARGET_HALF_EXTENT, GRAB_TARGET_HALF_EXTENT), 0.0f);
         }
     }
 
@@ -1461,7 +1526,7 @@ final class JoltPhysicsWorld implements AutoCloseable {
         int bodyCollisionGroupId = collisionGroupId;
         try (CollisionGroup collisionGroup = new CollisionGroup(selfCollisionFilter, bodyCollisionGroupId, subgroupId);
             MassProperties massProperties = new MassProperties().setMass(partMass(name));
-            BodyCreationSettings settings = new BodyCreationSettings().setShape(shape).setPosition(positionX, positionY, positionZ).setRotation(rotation).setMotionType(EMotionType.Dynamic).setMotionQuality(EMotionQuality.LinearCast).setObjectLayer(OBJECT_LAYER_MOVING).setCollisionGroup(collisionGroup).setOverrideMassProperties(EOverrideMassProperties.CalculateInertia).setMassPropertiesOverride(massProperties).setFriction(DEFAULT_PART_FRICTION).setRestitution(0.0f).setLinearDamping(linearDamping(name)).setAngularDamping(angularDamping(name)).setEnhancedInternalEdgeRemoval(true)) {
+            BodyCreationSettings settings = new BodyCreationSettings().setShape(shape).setPosition(positionX, positionY, positionZ).setRotation(rotation).setMotionType(EMotionType.Dynamic).setMotionQuality(EMotionQuality.LinearCast).setObjectLayer(OBJECT_LAYER_MOVING).setCollisionGroup(collisionGroup).setOverrideMassProperties(EOverrideMassProperties.CalculateInertia).setMassPropertiesOverride(massProperties).setFriction(RagdollConfig.physicsFriction()).setRestitution(0.0f).setLinearDamping(linearDamping(name)).setAngularDamping(angularDamping(name)).setEnhancedInternalEdgeRemoval(true)) {
             bodyId = bodyInterface.createAndAddBody(settings, EActivation.Activate);
         }
         RagdollPart part = new RagdollPart(name, innerShape, shape, bodyId, halfX, halfY, halfZ, offsetX, offsetY, offsetZ);
@@ -1481,34 +1546,18 @@ final class JoltPhysicsWorld implements AutoCloseable {
         };
     }
 
-    /**
-     * Original 64 kg profile: 32 + 8 + 4 + 4 + 8 + 8.
-     */
     private float partMass(String name) {
-        return basePartMass(name) * massScale;
+        RagdollConfig.CollisionBox box = collisionBox(name);
+        double volume = box.sizeX() * box.sizeY() * box.sizeZ();
+        return (float) (Math.cbrt(Math.max(1.0e-6, volume)) * massScale);
     }
 
     private float linearDamping(String name) {
-        return 0.25f;
+        return RagdollConfig.physicsLinearDamping();
     }
 
     private float angularDamping(String name) {
-        return 1.2f;
-    }
-
-    private static float basePartMass(String name) {
-        return switch(name) {
-            case "body" ->
-                TORSO_MASS;
-            case "head" ->
-                HEAD_MASS;
-            case "left_arm", "right_arm" ->
-                ARM_MASS;
-            case "left_leg", "right_leg" ->
-                LEG_MASS;
-            default ->
-                throw new IllegalArgumentException("Unknown ragdoll part: " + name);
-        };
+        return RagdollConfig.physicsAngularDamping();
     }
 
     private RagdollPart createAttachedPart(String name, double torsoAttachX, double torsoAttachY, double torsoAttachZ, double partAttachX, double partAttachY, double partAttachZ, Quat partRotation) {
@@ -1544,8 +1593,8 @@ final class JoltPhysicsWorld implements AutoCloseable {
             settings.makeFixedAxis(EAxis.TranslationX);
             settings.makeFixedAxis(EAxis.TranslationY);
             settings.makeFixedAxis(EAxis.TranslationZ);
-            // Sable leaves joint rotation free; position motors hold the
-            // head and limbs near their rest orientations.
+            // Sable keeps the angular axes free and uses capped position motors
+            // to ease each limb back toward its rest orientation.
             settings.makeFreeAxis(EAxis.RotationX);
             settings.makeFreeAxis(EAxis.RotationY);
             settings.makeFreeAxis(EAxis.RotationZ);
@@ -1555,9 +1604,12 @@ final class JoltPhysicsWorld implements AutoCloseable {
             settings.setNumPositionStepsOverride(jointPositionSteps(profile));
             settings.setNumVelocityStepsOverride(jointVelocitySteps(profile));
             SixDofConstraint constraint = (SixDofConstraint) bodyInterface.createConstraint(settings, first.bodyId, second.bodyId);
-            configureRestMotor(constraint.getMotorSettings(EAxis.RotationX), profile.motorFrequency, profile.motorDamping, profile.motorTorque);
-            configureRestMotor(constraint.getMotorSettings(EAxis.RotationY), profile.motorFrequency, profile.motorDamping, profile.motorTorque);
-            configureRestMotor(constraint.getMotorSettings(EAxis.RotationZ), profile.motorFrequency, profile.motorDamping, profile.motorTorque);
+            configureRestMotor(constraint.getMotorSettings(EAxis.RotationX),
+                    profile.motorFrequency, profile.motorDamping, profile.motorTorque);
+            configureRestMotor(constraint.getMotorSettings(EAxis.RotationY),
+                    profile.motorFrequency, profile.motorDamping, profile.motorTorque);
+            configureRestMotor(constraint.getMotorSettings(EAxis.RotationZ),
+                    profile.motorFrequency, profile.motorDamping, profile.motorTorque);
             constraint.setMotorState(EAxis.RotationX, EMotorState.Position);
             constraint.setMotorState(EAxis.RotationY, EMotorState.Position);
             constraint.setMotorState(EAxis.RotationZ, EMotorState.Position);
@@ -1567,7 +1619,8 @@ final class JoltPhysicsWorld implements AutoCloseable {
         }
     }
 
-    private static void configureRestMotor(MotorSettings motor, float frequency, float damping, float maxTorque) {
+    private static void configureRestMotor(MotorSettings motor, float frequency,
+                                           float damping, float maxTorque) {
         motor.getSpringSettings().setMode(ESpringMode.FrequencyAndDamping)
                 .setFrequency(frequency).setDamping(damping);
         motor.setTorqueLimit(maxTorque);
@@ -1767,6 +1820,7 @@ final class JoltPhysicsWorld implements AutoCloseable {
     }
 
     private void applySharedSubstepForces() {
+        applyLiveRagdollControls();
         applyPhysicsGunSubstep();
         touchedSpecialThisTick |= applyGrabPhysics();
         touchedSpecialThisTick |= applySpecialBlockPhysics();
@@ -1775,7 +1829,128 @@ final class JoltPhysicsWorld implements AutoCloseable {
         // while falling or thrown parts have a stronger, speed-scaled response.
         for (RagdollPart part : parts) {
             float speed = bodyInterface.getLinearVelocity(part.bodyId).length();
-            bodyInterface.setRestitution(part.bodyId, RagdollImpactResponse.restitution(speed));
+            bodyInterface.setRestitution(part.bodyId,
+                    RagdollImpactResponse.restitution(speed) * RagdollConfig.physicsRestitution());
+        }
+    }
+
+    void setLiveRagdollControl(boolean leftHand, boolean rightHand,
+                               float strafe, float forward) {
+        liveLeftHandPressed = leftHand;
+        liveRightHandPressed = rightHand;
+        liveStrafe = Float.isFinite(strafe) ? Math.clamp(strafe, -1.0f, 1.0f) : 0.0f;
+        liveForward = Float.isFinite(forward) ? Math.clamp(forward, -1.0f, 1.0f) : 0.0f;
+        activateAllParts();
+    }
+
+    private void applyLiveRagdollControls() {
+        updateLiveHandAnchor(0, liveLeftHandPressed, findPart("left_arm"));
+        updateLiveHandAnchor(1, liveRightHandPressed, findPart("right_arm"));
+        if (Math.max(Math.abs(liveStrafe), Math.abs(liveForward)) < 1.0e-3f) {
+            return;
+        }
+        Vec3 angularVelocity = bodyInterface.getAngularVelocity(torso.bodyId);
+        if (angularVelocity.length() > LIVE_RAGDOLL_MAX_ANGULAR_SPEED) {
+            return;
+        }
+        double[] worldTorque = rotate(bodyInterface.getRotation(torso.bodyId),
+                liveForward * LIVE_RAGDOLL_CONTROL_TORQUE,
+                -liveStrafe * LIVE_RAGDOLL_CONTROL_TORQUE,
+                0.0);
+        bodyInterface.addTorque(torso.bodyId, new Vec3(
+                (float) worldTorque[0], (float) worldTorque[1], (float) worldTorque[2]));
+        bodyInterface.activateBody(torso.bodyId);
+    }
+
+    private void updateLiveHandAnchor(int hand, boolean pressed, RagdollPart arm) {
+        if (!pressed || arm == null || arm.frozen) {
+            releaseLiveHandAnchor(hand);
+            return;
+        }
+        TwoBodyConstraint constraint = liveHandConstraints[hand];
+        if (constraint == null) {
+            HandContact contact = findHandContact(arm);
+            if (contact == null) {
+                return;
+            }
+            ensureGrabTargetShape();
+            net.minecraft.world.phys.Vec3 point = contact.surfacePoint();
+            int targetBody;
+            try (BodyCreationSettings settings = new BodyCreationSettings()
+                    .setShape(grabTargetShape)
+                    .setPosition(point.x - localOrigin.getX(), point.y - localOrigin.getY(), point.z - localOrigin.getZ())
+                    .setRotation(Quat.sIdentity())
+                    .setMotionType(EMotionType.Kinematic)
+                    .setObjectLayer(OBJECT_LAYER_GHOST)) {
+                targetBody = bodyInterface.createAndAddBody(settings, EActivation.Activate);
+            }
+            try (PointConstraintSettings settings = new PointConstraintSettings()) {
+                settings.setSpace(EConstraintSpace.WorldSpace);
+                settings.setNumPositionStepsOverride(2);
+                settings.setNumVelocityStepsOverride(1);
+                settings.setPoint1(new RVec3(contact.handPoint().x - localOrigin.getX(),
+                        contact.handPoint().y - localOrigin.getY(),
+                        contact.handPoint().z - localOrigin.getZ()));
+                settings.setPoint2(new RVec3(point.x - localOrigin.getX(),
+                        point.y - localOrigin.getY(), point.z - localOrigin.getZ()));
+                constraint = bodyInterface.createConstraint(settings, arm.bodyId, targetBody);
+            }
+            physicsSystem.addConstraint(constraint);
+            liveHandTargetBodyIds[hand] = targetBody;
+            liveHandConstraints[hand] = constraint;
+        }
+        bodyInterface.activateBody(arm.bodyId);
+        bodyInterface.activateBody(liveHandTargetBodyIds[hand]);
+    }
+
+    private HandContact findHandContact(RagdollPart arm) {
+        double[] center = collisionCenter(arm);
+        double[] handOffset = rotate(0.0, -arm.halfY, 0.0,
+                arm.rotationX, arm.rotationY, arm.rotationZ, arm.rotationW);
+        net.minecraft.world.phys.Vec3 handPoint = new net.minecraft.world.phys.Vec3(
+                center[0] + handOffset[0], center[1] + handOffset[1], center[2] + handOffset[2]);
+        BlockPos min = BlockPos.containing(handPoint.x - LIVE_HAND_CONTACT_DISTANCE,
+                handPoint.y - LIVE_HAND_CONTACT_DISTANCE,
+                handPoint.z - LIVE_HAND_CONTACT_DISTANCE);
+        BlockPos max = BlockPos.containing(handPoint.x + LIVE_HAND_CONTACT_DISTANCE,
+                handPoint.y + LIVE_HAND_CONTACT_DISTANCE,
+                handPoint.z + LIVE_HAND_CONTACT_DISTANCE);
+        double bestDistanceSquared = LIVE_HAND_CONTACT_DISTANCE * LIVE_HAND_CONTACT_DISTANCE;
+        HandContact closest = null;
+        for (BlockPos blockPos : BlockPos.betweenClosed(min, max)) {
+            if (!level.hasChunkAt(blockPos)) continue;
+            BlockState state = level.getBlockState(blockPos);
+            for (AABB localBox : state.getCollisionShape(level, blockPos, CollisionContext.empty()).toAabbs()) {
+                AABB worldBox = localBox.move(blockPos);
+                double contactX = Math.clamp(handPoint.x, worldBox.minX, worldBox.maxX);
+                double contactY = Math.clamp(handPoint.y, worldBox.minY, worldBox.maxY);
+                double contactZ = Math.clamp(handPoint.z, worldBox.minZ, worldBox.maxZ);
+                double dx = handPoint.x - contactX;
+                double dy = handPoint.y - contactY;
+                double dz = handPoint.z - contactZ;
+                double distanceSquared = dx * dx + dy * dy + dz * dz;
+                if (distanceSquared < bestDistanceSquared) {
+                    bestDistanceSquared = distanceSquared;
+                    closest = new HandContact(handPoint,
+                            new net.minecraft.world.phys.Vec3(contactX, contactY, contactZ));
+                }
+            }
+        }
+        return closest;
+    }
+
+    private void releaseLiveHandAnchor(int hand) {
+        TwoBodyConstraint constraint = liveHandConstraints[hand];
+        if (constraint != null) {
+            physicsSystem.removeConstraint(constraint);
+            constraint.close();
+            liveHandConstraints[hand] = null;
+        }
+        int targetBody = liveHandTargetBodyIds[hand];
+        if (targetBody != NO_TERRAIN_BODY) {
+            bodyInterface.removeBody(targetBody);
+            bodyInterface.destroyBody(targetBody);
+            liveHandTargetBodyIds[hand] = NO_TERRAIN_BODY;
         }
     }
 
@@ -1834,7 +2009,7 @@ final class JoltPhysicsWorld implements AutoCloseable {
             } else if (support.is(Blocks.HONEY_BLOCK) || support.is(Blocks.SLIME_BLOCK)) {
                 bodyInterface.setFriction(part.bodyId, STICKY_PART_FRICTION);
             } else {
-                bodyInterface.setFriction(part.bodyId, DEFAULT_PART_FRICTION);
+                bodyInterface.setFriction(part.bodyId, RagdollConfig.physicsFriction());
             }
             SpecialMedium medium = specialMedium(part);
             if (medium == SpecialMedium.NONE) {
@@ -1886,7 +2061,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
                 }
                 bodyInterface.setLinearVelocity(part.bodyId, current.getX() * horizontalFactor, velocityY, current.getZ() * horizontalFactor);
                 bodyInterface.activateBody(part.bodyId);
-                settledTicks = 0;
                 continue;
             }
             BlockContact contact = findImpactBlock(part);
@@ -1896,7 +2070,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
             float horizontalScale = Math.min(1.0f, HONEY_SLIDE_SPEED / before.getY());
             bodyInterface.setLinearVelocity(part.bodyId, before.getX() * horizontalScale, HONEY_SLIDE_SPEED, before.getZ() * horizontalScale);
             bodyInterface.activateBody(part.bodyId);
-            settledTicks = 0;
         }
     }
 
@@ -2173,7 +2346,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
         terrainBoxes = refreshed.boxes();
         terrainBoxCount = terrainBoxes.size();
         activateAllParts();
-        settledTicks = 0;
         RagdollMod.LOGGER.debug("Refreshed ragdoll terrain around {}: collisionBoxes={}->{}", scanCenter, previousBoxCount, terrainBoxCount);
     }
 
@@ -2365,7 +2537,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
             bodyInterface.setLinearVelocity(contactPart.bodyId, velocity.getX(),
                     RagdollImpactResponse.sweepVerticalVelocity(velocity.getY()), velocity.getZ());
         }
-        settledTicks = 0;
         updatePartTransforms(false);
         RagdollMod.LOGGER.debug("Prevented terrain tunneling by ragdoll part {} " + "(lifted {} blocks)", hitPartName, format(requiredLift));
         return true;
@@ -2428,6 +2599,10 @@ final class JoltPhysicsWorld implements AutoCloseable {
         return new AABB(minimumX - padding, minimumY - padding, minimumZ - padding, maximumX + padding, maximumY + padding, maximumZ + padding);
     }
 
+    AABB getEntityInteractionRenderBounds(float partialTick) {
+        return getPartRenderBounds(partialTick, 0.0);
+    }
+
     RagdollPartRenderState getPartRenderState(String partName, float partialTick) {
         RagdollPart part = findPart(partName);
         if (part == null) {
@@ -2459,6 +2634,11 @@ final class JoltPhysicsWorld implements AutoCloseable {
         return new RagdollPhysicsState(states);
     }
 
+    net.minecraft.world.phys.Vec3 torsoPosition() {
+        return new net.minecraft.world.phys.Vec3(
+                torso.worldX, torso.worldY, torso.worldZ);
+    }
+
     boolean applyState(RagdollPhysicsState state) {
         return applyState(state, true);
     }
@@ -2477,7 +2657,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
             bodyInterface.setLinearVelocity(part.bodyId, vx * scale, vy * scale, vz * scale);
             bodyInterface.activateBody(part.bodyId);
         }
-        settledTicks = 0;
     }
 
     /**
@@ -2504,7 +2683,6 @@ final class JoltPhysicsWorld implements AutoCloseable {
                             : EActivation.Activate);
             bodyInterface.activateBody(part.bodyId);
         }
-        settledTicks = 0;
     }
 
     /**
@@ -2569,15 +2747,11 @@ final class JoltPhysicsWorld implements AutoCloseable {
 
     private void updateRagdollSleeping(boolean touchingFluid) {
         if (touchingFluid) {
-            settledTicks = 0;
             return;
         }
         boolean anyActive = false;
-        float maxLinearSpeed = MAX_SETTLED_LINEAR_SPEED;
-        float maxAngularSpeed = MAX_SETTLED_ANGULAR_SPEED;
-        int settledTicksRequired = SETTLED_TICKS_BEFORE_SLEEP;
-        float maxLinearSpeedSquared = maxLinearSpeed * maxLinearSpeed;
-        float maxAngularSpeedSquared = maxAngularSpeed * maxAngularSpeed;
+        float maxLinearSpeedSquared = MAX_SLEEP_LINEAR_SPEED * MAX_SLEEP_LINEAR_SPEED;
+        float maxAngularSpeedSquared = MAX_SLEEP_ANGULAR_SPEED * MAX_SLEEP_ANGULAR_SPEED;
         for (RagdollPart part : parts) {
             if (!bodyInterface.isActive(part.bodyId)) {
                 continue;
@@ -2586,22 +2760,16 @@ final class JoltPhysicsWorld implements AutoCloseable {
             Vec3 linearVelocity = bodyInterface.getLinearVelocity(part.bodyId);
             Vec3 angularVelocity = bodyInterface.getAngularVelocity(part.bodyId);
             if (linearVelocity.lengthSq() > maxLinearSpeedSquared || angularVelocity.lengthSq() > maxAngularSpeedSquared) {
-                settledTicks = 0;
                 return;
             }
         }
         if (!anyActive) {
-            settledTicks = 0;
             return;
         }
-        ++settledTicks;
-        if (settledTicks >= settledTicksRequired) {
-            for (RagdollPart part : parts) {
-                bodyInterface.deactivateBody(part.bodyId);
-            }
-            settledTicks = 0;
-            RagdollMod.LOGGER.debug("Put settled Jolt ragdoll to sleep");
+        for (RagdollPart part : parts) {
+            bodyInterface.deactivateBody(part.bodyId);
         }
+        RagdollMod.LOGGER.debug("Put motionless Jolt ragdoll to sleep");
     }
 
     private void updatePartTransforms(boolean resetPrevious) {
@@ -2629,6 +2797,8 @@ final class JoltPhysicsWorld implements AutoCloseable {
         }
         closed = true;
         releaseGrab();
+        releaseLiveHandAnchor(0);
+        releaseLiveHandAnchor(1);
         for (TwoBodyConstraint constraint : constraints) {
             physicsSystem.removeConstraint(constraint);
             constraint.close();
@@ -2662,6 +2832,10 @@ final class JoltPhysicsWorld implements AutoCloseable {
     }
 
     private record FluidSample(float submergedFraction, double flowX, double flowY, double flowZ, double bubbleColumn, double surfaceBubbleColumn) {
+    }
+
+    private record HandContact(net.minecraft.world.phys.Vec3 handPoint,
+                               net.minecraft.world.phys.Vec3 surfacePoint) {
     }
 
     private enum SpecialMedium {
@@ -2901,16 +3075,17 @@ final class JoltPhysicsWorld implements AutoCloseable {
 
     private enum JointProfile {
 
-        NECK(0.65f, 1.8f, 1.4f, 40.0f),
-        SHOULDER(0.60f, 0.75f, 1.35f, 4.0f),
-        HIP(0.55f, 0.75f, 1.35f, 10.0f);
+        NECK(0.55f, 2.0f, 1.0f, 40.0f),
+        SHOULDER(0.45f, 1.0f, 0.9f, 4.0f),
+        HIP(0.40f, 1.0f, 0.9f, 10.0f);
 
         private final float frictionTorque;
         private final float motorFrequency;
         private final float motorDamping;
         private final float motorTorque;
 
-        JointProfile(float frictionTorque, float motorFrequency, float motorDamping, float motorTorque) {
+        JointProfile(float frictionTorque, float motorFrequency,
+                     float motorDamping, float motorTorque) {
             this.frictionTorque = frictionTorque;
             this.motorFrequency = motorFrequency;
             this.motorDamping = motorDamping;

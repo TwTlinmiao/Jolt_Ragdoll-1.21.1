@@ -103,6 +103,19 @@ public final class RagdollRenderer {
         PoseStack pose = event.getPoseStack();
         try {
             for (var ragdoll : ragdolls) {
+                if (RagdollConfig.showEntityInteractionBody()
+                        && ragdoll.entityInteractionBounds() != null) {
+                    AABB bounds = ragdoll.entityInteractionBounds();
+                    pose.pushPose();
+                    pose.translate(bounds.minX - camera.x,
+                            bounds.minY - camera.y, bounds.minZ - camera.z);
+                    LevelRenderer.renderLineBox(pose,
+                            buffers.getBuffer(RenderType.lines()),
+                            0.0, 0.0, 0.0,
+                            bounds.getXsize(), bounds.getYsize(), bounds.getZsize(),
+                            0.2f, 0.9f, 1.0f, 0.9f);
+                    pose.popPose();
+                }
                 for (var part : ragdoll.parts()) {
                     int light = LevelRenderer.getLightColor(minecraft.level,
                             BlockPos.containing(part.x(), part.y(), part.z()));

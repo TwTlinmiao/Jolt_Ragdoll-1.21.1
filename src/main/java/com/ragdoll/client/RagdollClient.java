@@ -10,12 +10,13 @@ import com.ragdoll.client.physics.RagdollPartRenderState;
 import com.ragdoll.mixin.client.CameraRagdollAccessor;
 import com.ragdoll.model.RagdollDeathSnapshot;
 import com.ragdoll.network.RagdollNetwork;
+import com.ragdoll.network.LiveRagdollControlPacket;
 import com.ragdoll.server.RagdollMenus;
+import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.CameraType;
 import net.minecraft.client.player.AbstractClientPlayer;
-import com.mojang.blaze3d.platform.InputConstants;
 import net.neoforged.neoforge.client.gui.IConfigScreenFactory;
 import net.neoforged.neoforge.client.gui.ConfigurationScreen;
 import net.neoforged.api.distmarker.Dist;
@@ -36,30 +37,28 @@ import org.lwjgl.glfw.GLFW;
 @Mod(value = RagdollMod.MOD_ID, dist = Dist.CLIENT)
 public final class RagdollClient {
     private static boolean installed;
-    private static float grabZoom = 1.0f;
+    private static final KeyMapping LIVE_RAGDOLL_KEY = new KeyMapping(
+            "key.ragdoll.liveToggle", InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_G, "key.categories.ragdoll");
+    private static final KeyMapping PUSH_RAGDOLL_KEY = new KeyMapping(
+            "key.ragdoll.push", InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_V, "key.categories.ragdoll");
+    private static boolean grabInputDown;
     private static boolean grabMouseCaptured;
     private static boolean grabDragStarted;
     private static long grabMousePressedAtNanos;
     private static java.util.UUID pendingBodyClick;
-    private static final String RAGDOLL_CATEGORY = "key.categories.ragdoll";
-    private static final KeyMapping GRAB_KEY = new KeyMapping(
-            "key.ragdoll.grab",
-            InputConstants.Type.MOUSE,
-            GLFW.GLFW_MOUSE_BUTTON_RIGHT,
-            RAGDOLL_CATEGORY);
-    private static final KeyMapping LIVE_RAGDOLL_KEY = new KeyMapping(
-            "key.ragdoll.liveToggle",
-            InputConstants.Type.KEYSYM,
-            GLFW.GLFW_KEY_G,
-            RAGDOLL_CATEGORY);
     private static ModContainer configContainer;
     private static CameraType previousLiveRagdollCameraType;
     private static CameraType previousSleepRagdollCameraType;
-    private static CameraType previousGrabCameraType;
     private static CameraType previousDeathCameraType;
     private static boolean shiftWasDown;
     private static boolean sleepWakeShiftWasDown;
     private static boolean sleepCameraLookInitialized;
+    private static boolean liveLeftMouseDown;
+    private static boolean liveRightMouseDown;
+    private static LiveRagdollControlPacket previousLiveControl =
+            new LiveRagdollControlPacket(false, false, 0.0f, 0.0f);
     private static float sleepCameraYaw;
     private static float sleepCameraPitch;
 
@@ -89,7 +88,6 @@ public final class RagdollClient {
         NeoForge.EVENT_BUS.addListener(RagdollClient::onInteractionKey);
         NeoForge.EVENT_BUS.addListener(RagdollClient::onMovementInput);
         NeoForge.EVENT_BUS.addListener(RagdollClient::onRenderHand);
-        NeoForge.EVENT_BUS.addListener(RagdollClient::onComputeFovModifier);
         NeoForge.EVENT_BUS.addListener(RagdollClient::onClientLogout);
         NeoForge.EVENT_BUS.addListener(RagdollRenderer::onRenderLevel);
         RagdollNetwork.clientSpawn = packet ->
@@ -120,10 +118,9 @@ public final class RagdollClient {
         });
     }
 
-    private static void onRegisterKeyMappings(
-            RegisterKeyMappingsEvent event) {
-        event.register(GRAB_KEY);
+    private static void onRegisterKeyMappings(RegisterKeyMappingsEvent event) {
         event.register(LIVE_RAGDOLL_KEY);
+        event.register(PUSH_RAGDOLL_KEY);
     }
 
     private static void onRegisterMenuScreens(
@@ -138,6 +135,7 @@ public final class RagdollClient {
         SleepRagdollTracker.tick(minecraft);
         updateDeathRagdollCameraType(minecraft);
         updateLiveRagdollCameraType(minecraft);
+        updateLiveRagdollControls(minecraft);
         updateSleepRagdollCameraType(minecraft);
         updateSleepWakeInput(minecraft);
         if (minecraft.player != null && minecraft.screen == null
@@ -145,12 +143,26 @@ public final class RagdollClient {
                 && LIVE_RAGDOLL_KEY.consumeClick()) {
             requestLiveRagdollToggle(minecraft);
         }
+        if (minecraft.player != null && minecraft.screen == null
+                && RagdollConfig.enabled() && !ClientPhysicsRuntime.isLiveRagdolled(minecraft.player.getUUID())
+                && !isLocalSleepInteractionLocked() && PUSH_RAGDOLL_KEY.consumeClick()) {
+            java.util.UUID grabbedRagdoll = ClientPhysicsRuntime.grabbedRagdollId();
+            if (grabbedRagdoll == null) {
+                grabbedRagdoll = RagdollPhysicsGunClient.localGrabbedRagdollId(minecraft);
+            }
+            RagdollNetwork.pushOrThrow(grabbedRagdoll);
+            grabMouseCaptured = false;
+            grabDragStarted = false;
+            pendingBodyClick = null;
+            grabInputDown = false;
+            ClientPhysicsRuntime.clearGrabAfterThrow();
+            RagdollPhysicsGunClient.clearGrabAfterThrow();
+        }
         updateGrabMouseHold();
         ClientPhysicsRuntime.updateGrabInput(minecraft,
-                GRAB_KEY.isDown() && !RagdollPhysicsGunClient.isArmed(minecraft)
+                grabInputDown && !RagdollPhysicsGunClient.isArmed(minecraft)
                         && !isLocalSleepInteractionLocked());
         RagdollPhysicsGunClient.tick(minecraft);
-        updateGrabRagdollCameraType(minecraft);
         ClientPhysicsRuntime.tick(minecraft);
         ClientPhysicsRuntime.followLocalLiveRagdoll(minecraft);
     }
@@ -171,7 +183,7 @@ public final class RagdollClient {
             pendingBodyClick = body;
             grabDragStarted = body == null;
             grabMousePressedAtNanos = System.nanoTime();
-            GRAB_KEY.setDown(grabDragStarted);
+            grabInputDown = grabDragStarted;
             return true;
         }
         if (action == GLFW.GLFW_RELEASE && grabMouseCaptured) {
@@ -183,10 +195,48 @@ public final class RagdollClient {
             grabMouseCaptured = false;
             grabDragStarted = false;
             pendingBodyClick = null;
-            GRAB_KEY.setDown(false);
+            grabInputDown = false;
             return true;
         }
         return false;
+    }
+
+    public static boolean handleLiveRagdollMouseButton(int button, int action) {
+        if (button != GLFW.GLFW_MOUSE_BUTTON_LEFT
+                && button != GLFW.GLFW_MOUSE_BUTTON_RIGHT) return false;
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.screen != null || minecraft.player == null
+                || !ClientPhysicsRuntime.isLiveRagdolled(minecraft.player.getUUID())) {
+            return false;
+        }
+        boolean pressed = action != GLFW.GLFW_RELEASE;
+        if (button == GLFW.GLFW_MOUSE_BUTTON_LEFT) liveLeftMouseDown = pressed;
+        else liveRightMouseDown = pressed;
+        return true;
+    }
+
+    private static void updateLiveRagdollControls(Minecraft minecraft) {
+        boolean active = minecraft.player != null && minecraft.screen == null
+                && ClientPhysicsRuntime.isLiveRagdolled(minecraft.player.getUUID());
+        float strafe = 0.0f;
+        float forward = 0.0f;
+        if (active) {
+            strafe = (minecraft.options.keyLeft.isDown() ? 1.0f : 0.0f)
+                    - (minecraft.options.keyRight.isDown() ? 1.0f : 0.0f);
+            forward = (minecraft.options.keyUp.isDown() ? 1.0f : 0.0f)
+                    - (minecraft.options.keyDown.isDown() ? 1.0f : 0.0f);
+        }
+        if (!active) {
+            liveLeftMouseDown = false;
+            liveRightMouseDown = false;
+        }
+        LiveRagdollControlPacket control = new LiveRagdollControlPacket(
+                active && liveLeftMouseDown, active && liveRightMouseDown,
+                strafe, forward);
+        if (!control.equals(previousLiveControl)) {
+            RagdollNetwork.sendLiveRagdollControl(control);
+            previousLiveControl = control;
+        }
     }
 
     private static void updateGrabMouseHold() {
@@ -194,7 +244,7 @@ public final class RagdollClient {
             grabMouseCaptured = false;
             grabDragStarted = false;
             pendingBodyClick = null;
-            GRAB_KEY.setDown(false);
+            grabInputDown = false;
             return;
         }
         if (!grabMouseCaptured || pendingBodyClick == null || grabDragStarted) return;
@@ -202,12 +252,12 @@ public final class RagdollClient {
         if (minecraft.player == null || minecraft.screen != null || !RagdollConfig.enabled()) {
             grabMouseCaptured = false;
             pendingBodyClick = null;
-            GRAB_KEY.setDown(false);
+            grabInputDown = false;
             return;
         }
         if (System.nanoTime() - grabMousePressedAtNanos >= 180_000_000L) {
             grabDragStarted = true;
-            GRAB_KEY.setDown(true);
+            grabInputDown = true;
         }
     }
 
@@ -258,9 +308,7 @@ public final class RagdollClient {
         if (!RagdollConfig.enabled() || minecraft.player == null) return false;
         return ClientPhysicsRuntime.isLiveRagdolled(minecraft.player.getUUID())
                 || SleepRagdollTracker.isLocalSleepRagdollActive(minecraft)
-                || DeathRagdollCamera.active()
-                || ClientPhysicsRuntime.isGrabActive()
-                || RagdollPhysicsGunClient.localGrabbedRagdollId(minecraft) != null;
+                || DeathRagdollCamera.active();
     }
 
     public static CameraType restrictRagdollCameraType(CameraType requested) {
@@ -276,9 +324,7 @@ public final class RagdollClient {
         if (isSleepRagdollCameraActive()) {
             return sleepRagdollCameraType();
         }
-        CameraType saved = previousGrabCameraType;
-        return saved == CameraType.FIRST_PERSON || saved == CameraType.THIRD_PERSON_BACK
-                ? saved : CameraType.THIRD_PERSON_BACK;
+        return CameraType.THIRD_PERSON_BACK;
     }
 
     public static void enforceRagdollCameraType() {
@@ -313,7 +359,7 @@ public final class RagdollClient {
             firstPerson = RagdollConfig.sleepRagdollCameraMode()
                     == RagdollConfig.SleepCameraMode.FIRST_PERSON;
         } else {
-            firstPerson = previousGrabCameraType == CameraType.FIRST_PERSON;
+            firstPerson = minecraft.options.getCameraType().isFirstPerson();
         }
 
         CameraRagdollAccessor accessor = (CameraRagdollAccessor) (Object) camera;
@@ -377,19 +423,6 @@ public final class RagdollClient {
             }
         }
 
-        // Grab mode keeps the player's selected vanilla perspective, but does
-        // not inherit a third-party camera's offset or rotation.
-        accessor.ragdoll$setRotation(
-                player.getViewYRot(partialTick), player.getXRot(), 0.0f);
-        if (firstPerson) {
-            net.minecraft.world.phys.Vec3 eye = player.getEyePosition(partialTick);
-            accessor.ragdoll$setPosition(eye.x, eye.y, eye.z);
-        } else {
-            net.minecraft.world.phys.Vec3 eye = player.getEyePosition(partialTick);
-            net.minecraft.world.phys.Vec3 position = ragdollThirdPersonPosition(
-                    minecraft, player, camera, eye, 4.0);
-            accessor.ragdoll$setPosition(position.x, position.y, position.z);
-        }
     }
 
     private static net.minecraft.world.phys.Vec3 ragdollThirdPersonPosition(
@@ -443,24 +476,6 @@ public final class RagdollClient {
         } else if (previousDeathCameraType != null && minecraft.options != null) {
             minecraft.options.setCameraType(previousDeathCameraType);
             previousDeathCameraType = null;
-        }
-    }
-
-    private static void updateGrabRagdollCameraType(Minecraft minecraft) {
-        boolean active = ClientPhysicsRuntime.isGrabActive()
-                || RagdollPhysicsGunClient.localGrabbedRagdollId(minecraft) != null;
-        if (active && minecraft.options != null) {
-            if (previousGrabCameraType == null) {
-                previousGrabCameraType = minecraft.options.getCameraType();
-            }
-            CameraType requested = previousGrabCameraType == CameraType.FIRST_PERSON
-                    ? CameraType.FIRST_PERSON : CameraType.THIRD_PERSON_BACK;
-            if (minecraft.options.getCameraType() != requested) {
-                minecraft.options.setCameraType(requested);
-            }
-        } else if (previousGrabCameraType != null && minecraft.options != null) {
-            minecraft.options.setCameraType(previousGrabCameraType);
-            previousGrabCameraType = null;
         }
     }
 
@@ -590,11 +605,10 @@ public final class RagdollClient {
             Minecraft.getInstance().options.setCameraType(previousSleepRagdollCameraType);
             previousSleepRagdollCameraType = null;
         }
-        if (previousGrabCameraType != null) {
-            Minecraft.getInstance().options.setCameraType(previousGrabCameraType);
-            previousGrabCameraType = null;
-        }
         sleepCameraLookInitialized = false;
+        liveLeftMouseDown = false;
+        liveRightMouseDown = false;
+        previousLiveControl = new LiveRagdollControlPacket(false, false, 0.0f, 0.0f);
         shiftWasDown = false;
         sleepWakeShiftWasDown = false;
     }
@@ -651,14 +665,6 @@ public final class RagdollClient {
             requestLiveRagdollToggle(minecraft);
         }
         shiftWasDown = shiftDown;
-        if (!liveRagdolled && ClientPhysicsRuntime.isGrabActive()) {
-            event.getEntity().setSprinting(false);
-            if (!shiftDown) {
-                input.forwardImpulse *= 0.3f;
-                input.leftImpulse *= 0.3f;
-            }
-            return;
-        }
         if (!liveRagdolled) return;
         input.forwardImpulse = 0.0f;
         input.leftImpulse = 0.0f;
@@ -677,17 +683,6 @@ public final class RagdollClient {
                 || ClientPhysicsRuntime.isLiveRagdolled(minecraft.player.getUUID()))) {
             event.setCanceled(true);
         }
-    }
-
-    private static void onComputeFovModifier(
-            net.neoforged.neoforge.client.event.ComputeFovModifierEvent event) {
-        Minecraft minecraft = Minecraft.getInstance();
-        boolean grabbing = event.getPlayer() == minecraft.player
-                && ClientPhysicsRuntime.isGrabActive();
-        float targetZoom = grabbing ? 0.85f : 1.0f;
-        grabZoom += (targetZoom - grabZoom) * 0.18f;
-        if (Math.abs(targetZoom - grabZoom) < 0.001f) grabZoom = targetZoom;
-        event.setNewFovModifier(event.getNewFovModifier() * grabZoom);
     }
 
     public static boolean shouldHideOriginalDeath(LivingEntity entity) {
